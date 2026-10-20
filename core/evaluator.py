@@ -1,0 +1,228 @@
+import io
+import os
+import re
+import tempfile
+import zipfile
+from typing import Any, Dict, List, Optional, Tuple, Union
+import numpy as np
+from PIL import Image
+
+class ModelEvaluator:
+    """Evaluates student Google Teachable Machine models on locked test datasets."""
+
+    STAGE_TARGETS: Dict[str, Dict[str, int]] = {
+        # class_name: binary_int (1 = positive/target class, 0 = negative/noise class)
+        "stage1": {"plant": 1, "not_plant": 0},
+        "stage2": {"invasive": 1, "non_invasive": 0},
+    }
+
+    def __init__(self, test_dataset_dir: str = "data/test_dataset") -> None:
+        self.test_dataset_dir = test_dataset_dir
+
+    def sanitize_labels(self, raw_lines: List[str]) -> List[str]:
+        cleaned: List[str] = []
+        for line in raw_lines:
+            text = line.strip()
+            if not text:
+                continue
+            # Remove leading numbers/indexes like "0 ", "1.", "0 - "
+            text = re.sub(r"^\d+[\s\.\-_:]*", "", text)
+            # Normalize whitespace and separators to underscores and lowercase
+            text = re.sub(r"[\s\-]+", "_", text).lower()
+            cleaned.append(text)
+        return cleaned
+
+    def unpack_model_zip(
+        self, zip_bytes_or_path: Union[bytes, str], extract_to: str
+    ) -> Tuple[str, List[str]]:
+        os.makedirs(extract_to, exist_ok=True)
+        if isinstance(zip_bytes_or_path, bytes):
+            with zipfile.ZipFile(io.BytesIO(zip_bytes_or_path), "r") as z:
+                z.extractall(extract_to)
+        else:
+            with zipfile.ZipFile(zip_bytes_or_path, "r") as z:
+                z.extractall(extract_to)
+
+        # Recursively search for model file (.h5, .keras, or .tflite) and labels.txt
+        model_path: Optional[str] = None
+        labels_path: Optional[str] = None
+
+        for root, _, files in os.walk(extract_to):
+            for f in files:
+                f_lower = f.lower()
+                if f_lower.endswith((".h5", ".keras", ".tflite")):
+                    # Prefer .h5 / .keras over .tflite if both exist
+                    if model_path is None or f_lower.endswith((".h5", ".keras")):
+                        model_path = os.path.join(root, f)
+                elif f_lower == "labels.txt":
+                    labels_path = os.path.join(root, f)
+
+        if not model_path:
+            raise ValueError(
+                "No valid model file (.h5, .keras, or .tflite) found in the zip archive."
+            )
+        if not labels_path:
+            raise ValueError("No 'labels.txt' file found in the zip archive.")
+
+        with open(labels_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_lines = f.readlines()
+        labels = self.sanitize_labels(raw_lines)
+        if not labels:
+            raise ValueError("'labels.txt' was empty or contained no valid class names.")
+
+        return model_path, labels
+
+    def preprocess_image(
+        self, image_path: str, target_size: Tuple[int, int] = (224, 224)
+    ) -> np.ndarray:
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+            arr = np.asarray(img, dtype=np.float32)
+            # Normalize to [-1, 1] as expected by standard Teachable Machine MobileNet
+            arr = (arr / 127.5) - 1.0
+            return np.expand_dims(arr, axis=0)
+
+    def compute_binary_metrics(
+        self,
+        y_true: List[int],
+        y_pred: List[int],
+        class_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        tp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 1)
+        fp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 1)
+        tn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 0)
+        fn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 0)
+        total = len(y_true)
+
+        accuracy = (tp + tn) / total if total > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            (2 * precision * recall) / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+
+        return {
+            "accuracy": round(float(accuracy), 4),
+            "precision": round(float(precision), 4),
+            "recall": round(float(recall), 4),
+            "f1": round(float(f1), 4),
+            "tp": int(tp),
+            "fp": int(fp),
+            "tn": int(tn),
+            "fn": int(fn),
+            "total_samples": int(total),
+        }
+
+    def _load_predictor(self, model_path: str):
+        if model_path.endswith(".tflite"):
+            try:
+                import tensorflow as tf
+                interpreter = tf.lite.Interpreter(model_path=model_path)
+            except Exception:
+                from tflite_runtime import interpreter as tflite
+                interpreter = tflite.Interpreter(model_path=model_path)
+            interpreter.allocate_tensors()
+            input_details = interpreter.get_input_details()
+            output_details = interpreter.get_output_details()
+
+            def predict(arr: np.ndarray) -> np.ndarray:
+                interpreter.set_tensor(input_details[0]["index"], arr)
+                interpreter.invoke()
+                return interpreter.get_tensor(output_details[0]["index"])
+
+            return predict
+        else:
+            import tensorflow as tf
+            # Load Keras model with compile=False for safety
+            model = tf.keras.models.load_model(model_path, compile=False)
+            return lambda arr: model.predict(arr, verbose=0)
+
+    def evaluate_submission(
+        self, zip_bytes_or_path: Union[bytes, str], stage: str
+    ) -> Dict[str, Any]:
+        if stage not in self.STAGE_TARGETS:
+            raise ValueError(f"Unknown stage: {stage}. Expected one of {list(self.STAGE_TARGETS.keys())}")
+
+        stage_mapping = self.STAGE_TARGETS[stage]
+        pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
+        neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path, labels = self.unpack_model_zip(zip_bytes_or_path, temp_dir)
+            predict_fn = self._load_predictor(model_path)
+
+            # Match model labels to our stage binary classes
+            pos_idx: Optional[int] = None
+            neg_idx: Optional[int] = None
+            for idx, label in enumerate(labels):
+                if label == pos_class or pos_class in label:
+                    pos_idx = idx
+                elif label == neg_class or neg_class in label:
+                    neg_idx = idx
+
+            # Fallback if label names were customized but exactly 2 classes exist
+            if (pos_idx is None or neg_idx is None) and len(labels) == 2:
+                # Default index 0 to positive or check common tokens
+                pos_idx = 0 if any(p in labels[0] for p in ["plant", "invasive", "yes", "pos"]) else 1
+                neg_idx = 1 if pos_idx == 0 else 0
+
+            if pos_idx is None:
+                raise ValueError(
+                    f"Could not map model labels {labels} to stage '{stage}' classes ('{pos_class}', '{neg_class}')."
+                )
+
+            # Gather test samples
+            y_true: List[int] = []
+            y_pred: List[int] = []
+            errors: List[Dict[str, Any]] = []
+
+            for cls_name, true_binary in [(neg_class, 0), (pos_class, 1)]:
+                cls_folder = os.path.join(self.test_dataset_dir, stage, cls_name)
+                if not os.path.exists(cls_folder):
+                    continue
+
+                for fname in sorted(os.listdir(cls_folder)):
+                    if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                        continue
+                    img_path = os.path.join(cls_folder, fname)
+                    try:
+                        arr = self.preprocess_image(img_path)
+                        preds = predict_fn(arr)[0]
+                        pred_label_idx = int(np.argmax(preds))
+                        confidence = float(np.max(preds))
+                        pred_binary = 1 if pred_label_idx == pos_idx else 0
+
+                        y_true.append(true_binary)
+                        y_pred.append(pred_binary)
+
+                        if pred_binary != true_binary:
+                            errors.append({
+                                "filename": fname,
+                                "image_path": img_path,
+                                "true_label": cls_name,
+                                "predicted_label": pos_class if pred_binary == 1 else neg_class,
+                                "confidence": round(confidence, 4),
+                                "error_type": "False Positive" if pred_binary == 1 else "False Negative",
+                            })
+                    except Exception:
+                        # Skip corrupt images gracefully as per Review Focus
+                        continue
+
+            if not y_true:
+                raise ValueError(
+                    f"No test images found in '{self.test_dataset_dir}/{stage}'. Please run Dataset Admin to create test splits first."
+                )
+
+            metrics = self.compute_binary_metrics(y_true, y_pred, class_names=[neg_class, pos_class])
+            # Sort errors by confidence descending (highest confidence mistakes first)
+            errors.sort(key=lambda x: x["confidence"], reverse=True)
+
+            return {
+                "stage": stage,
+                "labels": labels,
+                "metrics": metrics,
+                "errors": errors[:10],  # Top 10 bloopers
+            }
