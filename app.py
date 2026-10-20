@@ -8,6 +8,7 @@ import streamlit as st
 
 from core.dataset_manager import DatasetManager
 from core.evaluator import ModelEvaluator
+from core.gemini_benchmark import GeminiBenchmarkRunner
 from core.pipeline import PipelineEvaluator
 from core.storage import StorageManager
 
@@ -50,21 +51,46 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
     st.header(f"{stage_name} Leaderboard")
     leaderboard = storage.get_leaderboard(stage=stage)
 
-    if not leaderboard:
+    # Check for cached Gemini VLM benchmark
+    gemini_runner = GeminiBenchmarkRunner()
+    cache = gemini_runner.load_cache()
+    gemini_entry = cache.get(stage)
+
+    if not leaderboard and not gemini_entry:
         st.info(f"No models submitted to {stage_name} yet. Be the first team to submit!")
         return
 
     # Top summary metrics
-    top_run = leaderboard[0]
-    top_metrics = top_run.get("metrics", {})
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🥇 Top F1-Score", f"{top_metrics.get('f1', 0.0):.3f}")
-    col2.metric("🎯 Top Accuracy", f"{top_metrics.get('accuracy', 0.0) * 100:.1f}%")
-    col3.metric("🏆 Top Team", f"{top_run.get('team_name', 'Unknown')} ({top_run.get('model_version', '')})")
-    col4.metric("📊 Total Submissions", len(leaderboard))
+    if leaderboard:
+        top_run = leaderboard[0]
+        top_metrics = top_run.get("metrics", {})
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("🥇 Top Student F1", f"{top_metrics.get('f1', 0.0):.3f}")
+        col2.metric("🎯 Top Accuracy", f"{top_metrics.get('accuracy', 0.0) * 100:.1f}%")
+        col3.metric("🏆 Top Team", f"{top_run.get('team_name', 'Unknown')} ({top_run.get('model_version', '')})")
+        col4.metric("📊 Total Submissions", len(leaderboard))
 
     # Leaderboard table
     rows = []
+    # If Gemini benchmark exists, pin it as reference
+    if gemini_entry:
+        gm = gemini_entry.get("metrics", {})
+        rows.append({
+            "Rank": "🤖 BENCHMARK",
+            "Team": "Gemini 2.5 Flash",
+            "Version": "Zero-Shot VLM (SI)",
+            "F1-Score": f"{gm.get('f1', 0.0):.3f}",
+            "Accuracy": f"{gm.get('accuracy', 0.0) * 100:.1f}%",
+            "Precision": f"{gm.get('precision', 0.0):.3f}",
+            "Recall": f"{gm.get('recall', 0.0):.3f}",
+            "TP": gm.get("tp", 0),
+            "FP": gm.get("fp", 0),
+            "TN": gm.get("tn", 0),
+            "FN": gm.get("fn", 0),
+            "Submitted": "Coach Baseline",
+            "Notes": "Google Foundation Model Reference",
+        })
+
     for rank, run in enumerate(leaderboard, 1):
         m = run.get("metrics", {})
         dt = run.get("timestamp", "")[:16].replace("T", " ")
@@ -82,15 +108,10 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
             "FN": m.get("fn", 0),
             "Submitted": dt,
             "Notes": run.get("notes", ""),
-            "id": run.get("id"),
         })
 
     df = pd.DataFrame(rows)
-    st.dataframe(
-        df.drop(columns=["id"]),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
     # Hill-climbing line chart
     st.subheader("📈 Hill-Climbing Progress Over Time")
@@ -118,24 +139,26 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
         st.plotly_chart(fig_line, use_container_width=True)
 
     # Detailed inspection of top run
-    st.subheader(f"🔍 Inspecting Rank #1: {top_run.get('team_name')} ({top_run.get('model_version')})")
-    col_cm, col_err = st.columns([1, 1])
-    with col_cm:
-        render_confusion_matrix(top_metrics, pos_label=pos_label, neg_label=neg_label)
+    if leaderboard:
+        top_run = leaderboard[0]
+        st.subheader(f"🔍 Inspecting Rank #1: {top_run.get('team_name')} ({top_run.get('model_version')})")
+        col_cm, col_err = st.columns([1, 1])
+        with col_cm:
+            render_confusion_matrix(top_run.get("metrics", {}), pos_label=pos_label, neg_label=neg_label)
 
-    with col_err:
-        st.write("<b>Bloopers Gallery (Top False Alarms & Missed Weeds):</b>", unsafe_allow_html=True)
-        errors = top_run.get("errors", [])
-        if not errors:
-            st.success("🎉 Perfect score! No errors found on the test dataset.")
-        else:
-            for err in errors[:3]:
-                err_path = err.get("image_path")
-                caption = f"{err.get('error_type')}: True='{err.get('true_label')}', Pred='{err.get('predicted_label')}' (Conf: {err.get('confidence')})"
-                if err_path and os.path.exists(err_path):
-                    st.image(err_path, caption=caption, width=200)
-                else:
-                    st.write(f"- {caption} ({err.get('filename')})")
+        with col_err:
+            st.write("<b>Bloopers Gallery (Top False Alarms & Missed Weeds):</b>", unsafe_allow_html=True)
+            errors = top_run.get("errors", [])
+            if not errors:
+                st.success("🎉 Perfect score! No errors found on the test dataset.")
+            else:
+                for err in errors[:3]:
+                    err_path = err.get("image_path")
+                    caption = f"{err.get('error_type')}: True='{err.get('true_label')}', Pred='{err.get('predicted_label')}' (Conf: {err.get('confidence')})"
+                    if err_path and os.path.exists(err_path):
+                        st.image(err_path, caption=caption, width=200)
+                    else:
+                        st.write(f"- {caption} ({err.get('filename')})")
 
 def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     st.header("📤 Submit Your Teachable Machine Model")
@@ -347,6 +370,25 @@ def render_admin_tab(dataset_mgr: DatasetManager):
                 )
         else:
             st.info("Stage 2 training pack not generated yet.")
+
+    st.divider()
+    st.subheader("🤖 Coach P2: Gemini 2.5 Flash VLM Benchmark")
+    st.write(
+        "Run the state-of-the-art Gemini 2.5 Flash foundation model with botanical System Instructions "
+        "across the locked test set to establish an industry reference bar on the Leaderboard."
+    )
+    api_key_input = st.text_input("Gemini API Key (optional if GEMINI_API_KEY is in environment)", type="password")
+    bench_stage = st.selectbox("Stage to benchmark", options=["stage1", "stage2"])
+
+    if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary"):
+        with st.spinner("Connecting to Gemini API and running zero-shot botanical classification..."):
+            try:
+                runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
+                bench_res = runner.evaluate_stage_benchmark(stage=bench_stage)
+                st.success(f"✅ Gemini Benchmark Recorded! F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%")
+                st.json(bench_res["metrics"])
+            except Exception as e:
+                st.error(f"Gemini Benchmark Error: {str(e)}")
 
 def main():
     st.title("🌿 MIPS: Invasive Plant Species ML Platform")
