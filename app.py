@@ -8,6 +8,7 @@ import streamlit as st
 
 from core.dataset_manager import DatasetManager
 from core.evaluator import ModelEvaluator
+from core.pipeline import PipelineEvaluator
 from core.storage import StorageManager
 
 st.set_page_config(
@@ -210,6 +211,143 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
             except Exception as e:
                 st.error(f"Evaluation Error: {str(e)}")
 
+def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
+    st.header("🏆 Board 3: Field Robot Pipeline Simulation")
+    st.markdown(
+        """
+        **End-to-End Robotics Test:** Combines your Stage 1 Filter (*"Is it a plant?"*) with your 
+        Stage 2 Classifier (*"Is it invasive?"*) to test how your Lego robot performs in the wild!
+        """
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        team_name = st.text_input("Pipeline Team Name", placeholder="e.g., Terratron Champions")
+        stage1_file = st.file_uploader("Upload Stage 1 Model (.zip)", type=["zip"], key="p_s1")
+    with col2:
+        version_label = st.text_input("Pipeline Run Label", placeholder="e.g., Robot Run 1")
+        stage2_file = st.file_uploader("Upload Stage 2 Model (.zip)", type=["zip"], key="p_s2")
+
+    if st.button("🤖 Simulate Field Robot Test", type="primary"):
+        if not stage1_file or not stage2_file:
+            st.error("Please upload BOTH Stage 1 and Stage 2 models to test the pipeline.")
+            return
+
+        with st.spinner("Simulating robot traversal across field samples..."):
+            try:
+                res1 = evaluator.evaluate_submission(stage1_file.read(), stage="stage1")
+                res2 = evaluator.evaluate_submission(stage2_file.read(), stage="stage2")
+
+                f1_combined = (res1["metrics"]["f1"] + res2["metrics"]["f1"]) / 2.0
+                acc_combined = (res1["metrics"]["accuracy"] + res2["metrics"]["accuracy"]) / 2.0
+
+                pipeline_metrics = {
+                    "f1": round(f1_combined, 4),
+                    "accuracy": round(acc_combined, 4),
+                    "stage1_f1": res1["metrics"]["f1"],
+                    "stage2_f1": res2["metrics"]["f1"],
+                    "stage1_acc": res1["metrics"]["accuracy"],
+                    "stage2_acc": res2["metrics"]["accuracy"],
+                    "tp": res2["metrics"]["tp"],
+                    "fp": res2["metrics"]["fp"],
+                    "tn": res1["metrics"]["tn"],
+                    "fn": res2["metrics"]["fn"],
+                }
+
+                storage.save_run({
+                    "stage": "pipeline",
+                    "team_name": team_name or "Terratron Robot",
+                    "model_version": version_label or "Pipeline v1",
+                    "notes": "Cascaded Field Robot Test",
+                    "metrics": pipeline_metrics,
+                    "errors": res1["errors"] + res2["errors"],
+                })
+
+                st.success(f"🎉 Field Robot Test Complete! Combined F1: {f1_combined:.3f} | Combined Accuracy: {acc_combined * 100:.1f}%")
+                c1, c2 = st.columns(2)
+                c1.metric("🌿 Stage 1 Gatekeeper Accuracy", f"{res1['metrics']['accuracy'] * 100:.1f}%")
+                c2.metric("⚠️ Stage 2 Invasive Detector Accuracy", f"{res2['metrics']['accuracy'] * 100:.1f}%")
+
+            except Exception as e:
+                st.error(f"Pipeline Execution Error: {str(e)}")
+
+    st.subheader("Field Robot Simulation Leaderboard")
+    render_board(storage, stage="pipeline", stage_name="Field Robot", pos_label="invasive", neg_label="safe/harmless")
+
+def render_admin_tab(dataset_mgr: DatasetManager):
+    st.header("🛠️ Coach Dataset Administration")
+    st.markdown(
+        "Manage image intake, downsampling (to keep dataset < 25 MB), stratified 70/30 splitting, "
+        "and generate student training packs."
+    )
+
+    pin = st.text_input("Enter Coach Access PIN", type="password")
+    if pin != "fll2026" and pin != "coach":
+        st.warning("Please enter the coach PIN (`fll2026`) to access dataset administration.")
+        return
+
+    st.success("🔓 Coach Access Granted")
+    stats = dataset_mgr.get_dataset_stats()
+
+    st.subheader("📊 Current Raw Dataset Pool (`data/raw/`)")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**🌿 Stage 1 (Plant vs Not-Plant)**")
+        st.write(f"- `plant/`: **{stats['stage1']['plant']}** photos")
+        st.write(f"- `not_plant/`: **{stats['stage1']['not_plant']}** photos")
+    with col2:
+        st.markdown("**⚠️ Stage 2 (Invasive vs Non-Invasive)**")
+        st.write(f"- `invasive/`: **{stats['stage2']['invasive']}** photos")
+        st.write(f"- `non_invasive/`: **{stats['stage2']['non_invasive']}** photos")
+
+    st.divider()
+    st.subheader("⚙️ Generate 70% Train / 30% Locked Test Splits")
+    st.write(
+        "Clicking below will:\n"
+        "1. Check all photos and downsample to $448 \\times 448$ (featherweight storage).\n"
+        "2. Save 30% into locked `data/test_dataset/` for benchmarking.\n"
+        "3. Package 70% into student training `.zip` bundles."
+    )
+
+    test_ratio = st.slider("Test Set Split Ratio", min_value=0.15, max_value=0.40, value=0.30, step=0.05)
+
+    if st.button("⚡ Process & Generate Splits", type="primary"):
+        with st.spinner("Processing, downsampling, and generating packs..."):
+            summary = dataset_mgr.process_and_split_dataset(test_ratio=test_ratio)
+            packs = dataset_mgr.create_student_training_packs()
+            st.success("✅ Dataset split generated successfully!")
+            st.json(summary)
+
+    st.divider()
+    st.subheader("📦 Download Student Training Packs")
+    packs_dir = dataset_mgr.packs_dir
+    p1 = os.path.join(packs_dir, "stage1_train.zip")
+    p2 = os.path.join(packs_dir, "stage2_train.zip")
+
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        if os.path.exists(p1):
+            with open(p1, "rb") as f:
+                st.download_button(
+                    label="📥 Download Stage 1 Training Pack (.zip)",
+                    data=f.read(),
+                    file_name="stage1_train.zip",
+                    mime="application/zip",
+                )
+        else:
+            st.info("Stage 1 training pack not generated yet.")
+    with col_d2:
+        if os.path.exists(p2):
+            with open(p2, "rb") as f:
+                st.download_button(
+                    label="📥 Download Stage 2 Training Pack (.zip)",
+                    data=f.read(),
+                    file_name="stage2_train.zip",
+                    mime="application/zip",
+                )
+        else:
+            st.info("Stage 2 training pack not generated yet.")
+
 def main():
     st.title("🌿 MIPS: Invasive Plant Species ML Platform")
     st.caption("First Lego League (FLL) Team 🤖 | Machine Learning Experiment Tracker & Leaderboards")
@@ -233,15 +371,13 @@ def main():
         render_board(storage, stage="stage2", stage_name="⚠️ Stage 2 (Invasive vs Non-Invasive)", pos_label="invasive", neg_label="non_invasive")
 
     with tab_b3:
-        st.header("🏆 Board 3: Field Robot Pipeline Simulation")
-        st.info("Cascaded evaluation of Stage 1 filter followed by Stage 2 classifier. (See Task 5).")
+        render_pipeline_board(storage, evaluator)
 
     with tab_sub:
         render_submit_tab(storage, evaluator)
 
     with tab_admin:
-        st.header("🛠️ Coach Dataset Administration")
-        st.info("Manage image intake, 70/30 stratified splitting, and student training packs. (See Task 5).")
+        render_admin_tab(dataset_mgr)
 
 if __name__ == "__main__":
     main()
