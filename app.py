@@ -1,4 +1,5 @@
 import os
+import textwrap
 from datetime import datetime
 import pandas as pd
 from PIL import Image
@@ -41,7 +42,7 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: 
     tn_color = "#10b981"
     tn_bg = "rgba(16, 185, 129, 0.12)"
 
-    card_html = f"""
+    card_html = textwrap.dedent(f"""
     <div style="font-family: system-ui, -apple-system, sans-serif; margin: 8px 0 16px 0;">
         <div style="font-weight: 700; font-size: 15px; margin-bottom: 8px;">📊 2x2 Performance Scorecard</div>
         
@@ -90,8 +91,12 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: 
             </div>
         </div>
     </div>
-    """
-    st.markdown(card_html, unsafe_allow_html=True)
+    """).strip()
+
+    if hasattr(st, "html"):
+        st.html(card_html)
+    else:
+        st.markdown(card_html, unsafe_allow_html=True)
 
 def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label: str, neg_label: str):
     st.header(f"{stage_name} Leaderboard")
