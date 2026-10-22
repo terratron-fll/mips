@@ -3,7 +3,6 @@ from datetime import datetime
 import pandas as pd
 from PIL import Image
 import plotly.express as px
-import plotly.figure_factory as ff
 import streamlit as st
 
 from core.dataset_manager import DatasetManager
@@ -33,18 +32,18 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str):
         [f"<b>FN (Missed Weed)</b><br>{fn}", f"<b>TP (Caught)</b><br>{tp}"],
     ]
 
-    fig = ff.create_annotated_heatmap(
-        z=z,
+    fig = px.imshow(
+        z,
         x=x,
         y=y,
-        annotation_text=annotations,
-        colorscale="Greens",
-        showscale=False,
+        color_continuous_scale="Greens",
     )
+    fig.update_traces(text=annotations, texttemplate="%{text}")
     fig.update_layout(
         title="2x2 Confusion Matrix",
         margin=dict(l=40, r=40, t=50, b=40),
         height=320,
+        coloraxis_showscale=False,
     )
     st.plotly_chart(fig, use_container_width=True)
 
