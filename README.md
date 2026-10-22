@@ -1,15 +1,3 @@
----
-title: MIPS - FLL Invasive Plant ML Leaderboard
-emoji: 🌿
-colorFrom: green
-colorTo: emerald
-sdk: streamlit
-sdk_version: 1.50.0
-app_file: app.py
-pinned: false
-license: mit
----
-
 # MIPS: Model for Invasive Plant Species Detection
 
 **MIPS** is an ML evaluation platform, dataset manager, and experiment tracking leaderboard designed for First Lego League (FLL) robotics and innovation projects. 
@@ -62,26 +50,21 @@ Open your browser to `http://localhost:8501`. (On team Wi-Fi, other students can
 
 ---
 
-## ☁️ Deploying to Hugging Face Spaces
+## ☁️ Deploying to Streamlit Community Cloud
 
-### Step 1: Create Space on Hugging Face
-1. Go to [https://huggingface.co/new-space](https://huggingface.co/new-space).
-2. **Space name**: `mips`
-3. **License**: `mit`
-4. **SDK**: `Streamlit`
-5. **Hardware**: `CPU basic • 2 vCPU • 16GB RAM (Free)`
-6. **Visibility**: `Public`
-7. Click **Create Space**.
+Deploy for free in under 60 seconds with your GitHub account:
 
-### Step 2: Push to Hugging Face Space
-Add Hugging Face as a git remote and push:
-```bash
-git remote add hf https://huggingface.co/spaces/<YOUR_HF_USERNAME>/mips
-git push hf main
-```
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+2. Click **Create app** $\rightarrow$ **I already have an app**.
+3. Fill in:
+   - **Repository**: `terratron-fll/mips`
+   - **Branch**: `main`
+   - **Main file path**: `app.py`
+   - **App URL**: `terratron-mips` (or your choice)
+4. Click **Deploy!**
 
-Your app will immediately be live and accessible to your students, coaches, and FLL judges at:
-`https://huggingface.co/spaces/<YOUR_HF_USERNAME>/mips`
+Your live web platform will be accessible to your students, coaches, and FLL judges at:  
+`https://terratron-mips.streamlit.app`
 
 ---
 

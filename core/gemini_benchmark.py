@@ -30,6 +30,12 @@ class GeminiBenchmarkRunner:
     ) -> None:
         self.cache_file = cache_file
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not self.api_key:
+            try:
+                import streamlit as st
+                self.api_key = st.secrets.get("GEMINI_API_KEY")
+            except Exception:
+                pass
         self.model_name = model_name
 
     def get_system_instruction(self, stage: str) -> str:

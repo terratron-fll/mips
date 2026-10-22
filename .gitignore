@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .superpowers/
+.streamlit/secrets.toml
 data/raw/
 data/test_dataset/
 data/train_dataset/
