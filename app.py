@@ -24,28 +24,74 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: 
     fn = metrics.get("fn", 0)
     tn = metrics.get("tn", 0)
 
-    z = [[tn, fp], [fn, tp]]
-    x = [f"Pred: {neg_label}", f"Pred: {pos_label}"]
-    y = [f"Actual: {neg_label}", f"Actual: {pos_label}"]
-    annotations = [
-        [f"<b>TN</b><br>{tn}", f"<b>FP (False Alarm)</b><br>{fp}"],
-        [f"<b>FN (Missed Weed)</b><br>{fn}", f"<b>TP (Caught)</b><br>{tp}"],
-    ]
+    # Clean label formatting dynamically for any stage (e.g., cat, plant, invasive)
+    pos_clean = pos_label.replace("_", " ").title()
+    neg_clean = neg_label.replace("_", " ").title()
 
-    fig = px.imshow(
-        z,
-        x=x,
-        y=y,
-        color_continuous_scale="Greens",
-    )
-    fig.update_traces(text=annotations, texttemplate="%{text}")
-    fig.update_layout(
-        title="2x2 Confusion Matrix",
-        margin=dict(l=40, r=40, t=50, b=40),
-        height=320,
-        coloraxis_showscale=False,
-    )
-    st.plotly_chart(fig, use_container_width=True, key=key)
+    # Dynamic status colors (green for correct, amber/red for mistakes)
+    fp_color = "#f59e0b" if fp > 0 else "#9ca3af"
+    fp_bg = "rgba(245, 158, 11, 0.12)" if fp > 0 else "rgba(156, 163, 175, 0.08)"
+    
+    fn_color = "#ef4444" if fn > 0 else "#9ca3af"
+    fn_bg = "rgba(239, 68, 68, 0.12)" if fn > 0 else "rgba(156, 163, 175, 0.08)"
+
+    tp_color = "#10b981"
+    tp_bg = "rgba(16, 185, 129, 0.12)"
+
+    tn_color = "#10b981"
+    tn_bg = "rgba(16, 185, 129, 0.12)"
+
+    card_html = f"""
+    <div style="font-family: system-ui, -apple-system, sans-serif; margin: 8px 0 16px 0;">
+        <div style="font-weight: 700; font-size: 15px; margin-bottom: 8px;">📊 2x2 Performance Scorecard</div>
+        
+        <!-- Column Headers (Predictions) -->
+        <div style="display: grid; grid-template-columns: 110px 1fr 1fr; gap: 8px; margin-bottom: 6px; text-align: center; font-weight: 700; font-size: 12px; opacity: 0.85;">
+            <div></div>
+            <div style="background: rgba(128, 128, 128, 0.12); padding: 6px; border-radius: 6px;">PREDICTED:<br>{neg_clean}</div>
+            <div style="background: rgba(128, 128, 128, 0.12); padding: 6px; border-radius: 6px;">PREDICTED:<br>{pos_clean}</div>
+        </div>
+
+        <!-- Row 1: Actual Negative -->
+        <div style="display: grid; grid-template-columns: 110px 1fr 1fr; gap: 8px; margin-bottom: 8px;">
+            <div style="display: flex; align-items: center; justify-content: center; background: rgba(128, 128, 128, 0.12); border-radius: 6px; font-weight: 700; font-size: 12px; text-align: center; padding: 6px; opacity: 0.85;">
+                ACTUAL:<br>{neg_clean}
+            </div>
+            <!-- TN Card -->
+            <div style="background: {tn_bg}; border: 2px solid {tn_color}; border-radius: 8px; padding: 10px; text-align: center;">
+                <div style="font-size: 11px; font-weight: 800; color: {tn_color}; letter-spacing: 0.5px;">✅ TRUE NEGATIVE</div>
+                <div style="font-size: 32px; font-weight: 900; line-height: 1.1; margin: 4px 0;">{tn}</div>
+                <div style="font-size: 11px; opacity: 0.85;">Correctly called {neg_clean}</div>
+            </div>
+            <!-- FP Card -->
+            <div style="background: {fp_bg}; border: 2px solid {fp_color}; border-radius: 8px; padding: 10px; text-align: center;">
+                <div style="font-size: 11px; font-weight: 800; color: {fp_color}; letter-spacing: 0.5px;">⚠️ FALSE ALARM (FP)</div>
+                <div style="font-size: 32px; font-weight: 900; line-height: 1.1; margin: 4px 0;">{fp}</div>
+                <div style="font-size: 11px; opacity: 0.85;">Mistakenly called {pos_clean}</div>
+            </div>
+        </div>
+
+        <!-- Row 2: Actual Positive -->
+        <div style="display: grid; grid-template-columns: 110px 1fr 1fr; gap: 8px;">
+            <div style="display: flex; align-items: center; justify-content: center; background: rgba(128, 128, 128, 0.12); border-radius: 6px; font-weight: 700; font-size: 12px; text-align: center; padding: 6px; opacity: 0.85;">
+                ACTUAL:<br>{pos_clean}
+            </div>
+            <!-- FN Card -->
+            <div style="background: {fn_bg}; border: 2px solid {fn_color}; border-radius: 8px; padding: 10px; text-align: center;">
+                <div style="font-size: 11px; font-weight: 800; color: {fn_color}; letter-spacing: 0.5px;">❌ MISSED TARGET (FN)</div>
+                <div style="font-size: 32px; font-weight: 900; line-height: 1.1; margin: 4px 0;">{fn}</div>
+                <div style="font-size: 11px; opacity: 0.85;">Actually {pos_clean}, but missed</div>
+            </div>
+            <!-- TP Card -->
+            <div style="background: {tp_bg}; border: 2px solid {tp_color}; border-radius: 8px; padding: 10px; text-align: center;">
+                <div style="font-size: 11px; font-weight: 800; color: {tp_color}; letter-spacing: 0.5px;">🎯 TRUE POSITIVE</div>
+                <div style="font-size: 32px; font-weight: 900; line-height: 1.1; margin: 4px 0;">{tp}</div>
+                <div style="font-size: 11px; opacity: 0.85;">Correctly caught {pos_clean}</div>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
 
 def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label: str, neg_label: str):
     st.header(f"{stage_name} Leaderboard")
