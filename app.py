@@ -11,6 +11,7 @@ from core.evaluator import ModelEvaluator
 from core.gemini_benchmark import GeminiBenchmarkRunner
 from core.pipeline import PipelineEvaluator
 from core.storage import StorageManager
+from scripts.seed_intro_data import seed_cat_dataset
 
 st.set_page_config(
     page_title="MIPS: Invasive Plants ML Leaderboard",
@@ -72,7 +73,6 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
     # Leaderboard table
     rows = []
-    # If Gemini benchmark exists, pin it as reference
     if gemini_entry:
         gm = gemini_entry.get("metrics", {})
         rows.append({
@@ -177,8 +177,12 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     with col2:
         stage = st.selectbox(
             "Which board are you submitting to?",
-            options=["stage1", "stage2"],
-            format_func=lambda x: "🌿 Stage 1: Plant vs Not-Plant" if x == "stage1" else "⚠️ Stage 2: Invasive vs Non-Invasive",
+            options=["intro", "stage1", "stage2"],
+            format_func=lambda x: {
+                "intro": "🐱 Tutorial: Cat vs Not-Cat",
+                "stage1": "🌿 Stage 1: Plant vs Not-Plant",
+                "stage2": "⚠️ Stage 2: Invasive vs Non-Invasive",
+            }[x],
         )
         notes = st.text_input("Experiment Notes (What did you change?)", placeholder="e.g., Added 20 photos with sun glare and shadows")
 
@@ -213,8 +217,8 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
                 st.success(f"🎉 Evaluation Complete! F1-Score: {metrics['f1']:.3f} | Accuracy: {metrics['accuracy'] * 100:.1f}%")
 
                 col_res1, col_res2 = st.columns([1, 1])
-                pos_label = "plant" if stage == "stage1" else "invasive"
-                neg_label = "not_plant" if stage == "stage1" else "non_invasive"
+                pos_label = "cat" if stage == "intro" else ("plant" if stage == "stage1" else "invasive")
+                neg_label = "not_cat" if stage == "intro" else ("not_plant" if stage == "stage1" else "non_invasive")
 
                 with col_res1:
                     render_confusion_matrix(metrics, pos_label=pos_label, neg_label=neg_label)
@@ -303,7 +307,17 @@ def render_admin_tab(dataset_mgr: DatasetManager):
     stats = dataset_mgr.get_dataset_stats()
 
     st.subheader("📊 Current Raw Dataset Pool (`data/raw/`)")
-    col1, col2 = st.columns(2)
+    col0, col1, col2 = st.columns(3)
+    with col0:
+        st.markdown("**🐱 Tutorial (Cat vs Not-Cat)**")
+        st.write(f"- `cat/`: **{stats.get('intro', {}).get('cat', 0)}** photos")
+        st.write(f"- `not_cat/`: **{stats.get('intro', {}).get('not_cat', 0)}** photos")
+        if st.button("⚡ Fetch Cat vs. Not-Cat from Hugging Face"):
+            with st.spinner("Fetching samples from Hugging Face Datasets (Bingsu/Cat_and_Dog)..."):
+                seed_res = seed_cat_dataset()
+                st.success(f"Fetched {seed_res['cat_saved']} cats and {seed_res['not_cat_saved']} not-cats from {seed_res['source']}!")
+                st.rerun()
+
     with col1:
         st.markdown("**🌿 Stage 1 (Plant vs Not-Plant)**")
         st.write(f"- `plant/`: **{stats['stage1']['plant']}** photos")
@@ -334,10 +348,23 @@ def render_admin_tab(dataset_mgr: DatasetManager):
     st.divider()
     st.subheader("📦 Download Student Training Packs")
     packs_dir = dataset_mgr.packs_dir
+    p0 = os.path.join(packs_dir, "intro_train.zip")
     p1 = os.path.join(packs_dir, "stage1_train.zip")
     p2 = os.path.join(packs_dir, "stage2_train.zip")
 
-    col_d1, col_d2 = st.columns(2)
+    col_d0, col_d1, col_d2 = st.columns(3)
+    with col_d0:
+        if os.path.exists(p0):
+            with open(p0, "rb") as f:
+                st.download_button(
+                    label="📥 Download Tutorial Pack (.zip)",
+                    data=f.read(),
+                    file_name="intro_train.zip",
+                    mime="application/zip",
+                )
+        else:
+            st.info("Tutorial training pack not generated yet.")
+
     with col_d1:
         if os.path.exists(p1):
             with open(p1, "rb") as f:
@@ -349,6 +376,7 @@ def render_admin_tab(dataset_mgr: DatasetManager):
                 )
         else:
             st.info("Stage 1 training pack not generated yet.")
+
     with col_d2:
         if os.path.exists(p2):
             with open(p2, "rb") as f:
@@ -388,13 +416,27 @@ def main():
     dataset_mgr = DatasetManager()
     evaluator = ModelEvaluator()
 
-    tab_b1, tab_b2, tab_b3, tab_sub, tab_admin = st.tabs([
+    tab_intro, tab_b1, tab_b2, tab_b3, tab_sub, tab_admin = st.tabs([
+        "🐱 Tutorial: Cat vs Not-Cat",
         "🌿 Board 1: Plant vs Not-Plant",
         "⚠️ Board 2: Invasive vs Non-Invasive",
         "🏆 Board 3: Field Robot Pipeline",
         "📤 Submit Model",
         "🛠️ Coach Dataset Admin",
     ])
+
+    with tab_intro:
+        st.markdown(
+            """
+            > **Welcome to the MIPS Machine Learning Tutorial!** 🎓  
+            > Before classifying invasive plants, practice the entire process using the famous **Cat vs. Not-Cat** dataset.  
+            > 1. Download `intro_train.zip` from the **Coach Dataset Admin** tab (or ask your coach).  
+            > 2. Open [Google Teachable Machine](https://teachablemachine.withgoogle.com/) and create an Image Project.  
+            > 3. Add `cat` and `not_cat` classes, train, and export your model.  
+            > 4. Submit it in the **Submit Model** tab to see your score on this leaderboard!
+            """
+        )
+        render_board(storage, stage="intro", stage_name="🐱 Tutorial: Cat vs Not-Cat", pos_label="cat", neg_label="not_cat")
 
     with tab_b1:
         render_board(storage, stage="stage1", stage_name="🌿 Stage 1 (Plant vs Not-Plant)", pos_label="plant", neg_label="not_plant")

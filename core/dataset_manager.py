@@ -9,6 +9,7 @@ class DatasetManager:
     """Manages raw intake, downsampling, train/test splitting, and zip packaging."""
 
     STAGES: Dict[str, List[str]] = {
+        "intro": ["cat", "not_cat"],
         "stage1": ["plant", "not_plant"],
         "stage2": ["invasive", "non_invasive"],
     }

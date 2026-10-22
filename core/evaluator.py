@@ -13,6 +13,7 @@ class ModelEvaluator:
 
     STAGE_TARGETS: Dict[str, Dict[str, int]] = {
         # class_name: binary_int (1 = positive/target class, 0 = negative/noise class)
+        "intro": {"cat": 1, "not_cat": 0},
         "stage1": {"plant": 1, "not_plant": 0},
         "stage2": {"invasive": 1, "non_invasive": 0},
     }
