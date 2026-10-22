@@ -166,25 +166,18 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     with st.expander("❓ Exactly Which Export Option to Pick in Google Teachable Machine", expanded=True):
         st.markdown(
             """
-            Google Teachable Machine has three export tabs (**TensorFlow.js**, **TensorFlow**, and **TensorFlow Lite**).  
-            **Pick ONE of these two supported options:**
+            ### 🌟 Recommended Export: TensorFlow Lite (Floating point)
+            Google Teachable Machine's legacy Keras (`.h5`) format has known graph incompatibilities with modern TensorFlow.  
+            **Always use TensorFlow Lite:**
 
-            * 🥇 **Option 1 (Recommended): TensorFlow $\\rightarrow$ Keras**
-              * Click the **TensorFlow** tab.
-              * Select the **Keras** radio button.
-              * Click **Download my model** (downloads a `.zip` containing `keras_model.h5` and `labels.txt`).
-            
-            * 🥈 **Option 2 (Lightweight / Fast): TensorFlow Lite $\\rightarrow$ Floating point**
-              * Click the **TensorFlow Lite** tab.
-              * Select the **Floating point** radio button.
-              * Click **Download my model** (downloads a `.zip` containing `model_unquant.tflite` and `labels.txt`).
+            1. In Teachable Machine, click **Export Model**.
+            2. Click the **TensorFlow Lite** tab at the top.
+            3. Select the **Floating point** radio button.
+            4. Click **Download my model** (this will download a `.zip` containing `model_unquant.tflite` and `labels.txt`).
+            5. Drop that downloaded `.zip` file below!
 
             ---
-            **❌ What NOT to pick (and why):**
-            * ❌ **TensorFlow.js**: This exports a web `model.json` bundle designed to run inside JavaScript browser apps, not Python evaluation backends.
-            * ❌ **TensorFlow $\\rightarrow$ SavedModel**: Creates a multi-file folder directory (`saved_model.pb`) rather than a single portable model file.
-            * ❌ **TensorFlow Lite $\\rightarrow$ EdgeTPU**: Only runs on specialized Google Coral microchips; fails on standard computer processors.
-            * ⚠️ **TensorFlow Lite $\\rightarrow$ Quantized**: Supported, but slightly lower accuracy than Floating point.
+            *Why TensorFlow Lite?* It is a self-contained FlatBuffer model that runs 5x faster, uses less memory, and completely avoids Keras Python version incompatibilities.
             """
         )
 
@@ -455,9 +448,8 @@ def main():
             > 2. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/).  
             > 3. Name your classes `cat` and `not_cat`, then drag/upload the images from each folder into its matching class.  
             > 4. Click **Train Model**, then **Export Model**:  
-            >    - **Option 1 (Recommended):** **TensorFlow** tab $\\rightarrow$ select **Keras** $\\rightarrow$ **Download my model**.  
-            >    - **Option 2 (Fast):** **TensorFlow Lite** tab $\\rightarrow$ select **Floating point** $\\rightarrow$ **Download my model**.  
-            >    - *(Do not pick TensorFlow.js, SavedModel, or EdgeTPU).*  
+            >    - Choose **TensorFlow Lite** tab $\\rightarrow$ select **Floating point** $\\rightarrow$ **Download my model**.  
+            >    - *(Avoid Keras, TensorFlow.js, SavedModel, or EdgeTPU).*  
             > 5. Upload that downloaded `.zip` file in the **📤 Submit Model** tab to evaluate!
             """
         )

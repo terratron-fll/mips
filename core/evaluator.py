@@ -58,7 +58,7 @@ class ModelEvaluator:
                     continue
                 f_lower = f.lower()
                 if f_lower.endswith((".h5", ".keras", ".tflite")):
-                    if model_path is None or f_lower.endswith((".h5", ".keras")):
+                    if model_path is None or f_lower.endswith(".tflite"):
                         model_path = os.path.join(root, f)
                 elif f_lower == "labels.txt":
                     labels_path = os.path.join(root, f)
@@ -246,13 +246,24 @@ class ModelEvaluator:
                 pass
 
             try:
-                model = tf.keras.models.load_model(
-                    model_path, compile=False, custom_objects=custom_objects
-                )
-            except Exception:
-                model = tf.keras.models.load_model(model_path, compile=False)
+                try:
+                    model = tf.keras.models.load_model(
+                        model_path, compile=False, custom_objects=custom_objects
+                    )
+                except Exception:
+                    model = tf.keras.models.load_model(model_path, compile=False)
 
-            return lambda arr: model.predict(arr, verbose=0)
+                # Test predict on dummy input to catch graph breakage before processing full dataset
+                dummy_input = np.zeros((1, 224, 224, 3), dtype=np.float32)
+                model.predict(dummy_input, verbose=0)
+                return lambda arr: model.predict(arr, verbose=0)
+            except Exception as e:
+                raise ValueError(
+                    "Google Teachable Machine's legacy Keras (.h5) format has known graph incompatibilities with modern TensorFlow "
+                    f"({str(e)}). Please re-export your model from Teachable Machine using: "
+                    "'TensorFlow Lite' tab -> select 'Floating point' -> click 'Download my model'. "
+                    "TensorFlow Lite (.tflite) runs reliably and avoids Keras graph issues entirely!"
+                )
 
     def evaluate_submission(
         self, zip_bytes_or_path: Union[bytes, str], stage: str
