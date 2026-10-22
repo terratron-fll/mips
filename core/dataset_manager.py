@@ -88,23 +88,26 @@ class DatasetManager:
                     for f in os.listdir(raw_folder)
                     if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
                 ]
+                # Sort first for deterministic shuffling across platforms
+                images.sort()
                 random.shuffle(images)
 
-                # Determine test split count (at least 1 if >=2 images exist)
                 n_total = len(images)
                 n_test = max(1, int(round(n_total * test_ratio))) if n_total >= 2 else 0
                 test_images = images[:n_test]
                 train_images = images[n_test:]
 
                 for fname in test_images:
+                    base_name = os.path.splitext(fname)[0] + ".jpg"
                     src = os.path.join(raw_folder, fname)
-                    dest = os.path.join(t_dir, fname)
+                    dest = os.path.join(t_dir, base_name)
                     if self.downsample_and_save_image(src, dest):
                         summary[stage]["test"] += 1
 
                 for fname in train_images:
+                    base_name = os.path.splitext(fname)[0] + ".jpg"
                     src = os.path.join(raw_folder, fname)
-                    dest = os.path.join(tr_dir, fname)
+                    dest = os.path.join(tr_dir, base_name)
                     if self.downsample_and_save_image(src, dest):
                         summary[stage]["train"] += 1
 
@@ -118,7 +121,7 @@ class DatasetManager:
                 for cls in classes:
                     folder = os.path.join(self.train_dir, stage, cls)
                     if os.path.exists(folder):
-                        for fname in os.listdir(folder):
+                        for fname in sorted(os.listdir(folder)):
                             fpath = os.path.join(folder, fname)
                             if os.path.isfile(fpath):
                                 arcname = f"{cls}/{fname}"

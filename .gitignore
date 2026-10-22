@@ -6,6 +6,7 @@ __pycache__/
 .superpowers/
 data/raw/
 data/test_dataset/
+data/train_dataset/
 data/training_packs/
 data/gemini_cache.json
 data/leaderboard_history.json

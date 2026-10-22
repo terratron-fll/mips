@@ -45,18 +45,38 @@ def test_sanitize_labels_handling():
     cleaned = evaluator.sanitize_labels(raw_labels)
     assert cleaned == ["plant", "not_plant"]
 
-def test_unpack_nested_model_zip(tmp_path):
+def test_resolve_class_indices_exact_and_inverted_order():
+    evaluator = ModelEvaluator()
+    # Case 1: Standard order
+    pos_idx, neg_idx = evaluator.resolve_class_indices(["plant", "not_plant"], stage="stage1")
+    assert pos_idx == 0
+    assert neg_idx == 1
+
+    # Case 2: Inverted order (not_plant first) - must NOT misidentify not_plant as plant!
+    pos_idx, neg_idx = evaluator.resolve_class_indices(["not_plant", "plant"], stage="stage1")
+    assert pos_idx == 1
+    assert neg_idx == 0
+
+    # Case 3: Stage 2 inverted order (non_invasive first)
+    pos_idx, neg_idx = evaluator.resolve_class_indices(["non_invasive", "invasive"], stage="stage2")
+    assert pos_idx == 1
+    assert neg_idx == 0
+
+def test_unpack_ignores_macosx_appledouble(tmp_path):
     evaluator = ModelEvaluator()
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as z:
-        # Put inside a nested directory
-        z.writestr("my_model_folder/labels.txt", "0 plant\n1 not_plant\n")
-        z.writestr("my_model_folder/model.tflite", b"dummy_tflite_bytes")
+        # Add AppleDouble corrupt metadata
+        z.writestr("__MACOSX/._model.tflite", b"junk_metadata")
+        z.writestr("__MACOSX/._labels.txt", b"junk_metadata")
+        # Add real model and labels
+        z.writestr("model.tflite", b"real_tflite_bytes")
+        z.writestr("labels.txt", "0 plant\n1 not_plant\n")
 
     extract_dir = str(tmp_path / "extracted")
     model_path, labels = evaluator.unpack_model_zip(zip_buf.getvalue(), extract_dir)
-    assert os.path.exists(model_path)
-    assert model_path.endswith("model.tflite")
+    assert not os.path.basename(model_path).startswith("._")
+    assert "__MACOSX" not in model_path
     assert labels == ["plant", "not_plant"]
 
 def test_preprocess_image(tmp_path):

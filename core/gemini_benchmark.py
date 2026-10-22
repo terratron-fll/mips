@@ -86,17 +86,10 @@ class GeminiBenchmarkRunner:
                 img_path = os.path.join(cls_folder, fname)
                 try:
                     pil_img = Image.open(img_path)
+                    # Pass [prompt, pil_img] directly so the SDK automatically creates an inline Blob
                     response = client.models.generate_content(
                         model=self.model_name,
-                        contents=[
-                            types.Content(
-                                role="user",
-                                parts=[
-                                    types.Part.from_text(text="Classify this image:"),
-                                    pil_img,
-                                ],
-                            )
-                        ],
+                        contents=["Classify this image:", pil_img],
                         config=types.GenerateContentConfig(
                             system_instruction=sys_instruction,
                             response_mime_type="application/json",
@@ -105,10 +98,10 @@ class GeminiBenchmarkRunner:
                     )
 
                     text_resp = response.text or "{}"
-                    # Clean any markdown code blocks
-                    text_resp = re.sub(r"^```json\s*", "", text_resp.strip())
-                    text_resp = re.sub(r"\s*```$", "", text_resp.strip())
-                    data = json.loads(text_resp)
+                    # Robust extraction of JSON object substring
+                    json_match = re.search(r"\{.*\}", text_resp, re.DOTALL)
+                    json_str = json_match.group(0) if json_match else "{}"
+                    data = json.loads(json_str)
 
                     pred_label = data.get("label", "").lower()
                     conf = float(data.get("confidence", 0.90))

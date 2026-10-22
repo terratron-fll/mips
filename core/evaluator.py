@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 import re
@@ -44,14 +45,18 @@ class ModelEvaluator:
                 z.extractall(extract_to)
 
         # Recursively search for model file (.h5, .keras, or .tflite) and labels.txt
+        # Ignore macOS AppleDouble metadata (__MACOSX and ._ files)
         model_path: Optional[str] = None
         labels_path: Optional[str] = None
 
         for root, _, files in os.walk(extract_to):
+            if "__macosx" in root.lower():
+                continue
             for f in files:
+                if f.startswith("._"):
+                    continue
                 f_lower = f.lower()
                 if f_lower.endswith((".h5", ".keras", ".tflite")):
-                    # Prefer .h5 / .keras over .tflite if both exist
                     if model_path is None or f_lower.endswith((".h5", ".keras")):
                         model_path = os.path.join(root, f)
                 elif f_lower == "labels.txt":
@@ -71,6 +76,46 @@ class ModelEvaluator:
             raise ValueError("'labels.txt' was empty or contained no valid class names.")
 
         return model_path, labels
+
+    def resolve_class_indices(self, labels: List[str], stage: str) -> Tuple[int, int]:
+        if stage not in self.STAGE_TARGETS:
+            raise ValueError(f"Unknown stage: {stage}")
+
+        stage_mapping = self.STAGE_TARGETS[stage]
+        pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
+        neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
+
+        pos_idx: Optional[int] = None
+        neg_idx: Optional[int] = None
+
+        # 1. Exact match first
+        for idx, label in enumerate(labels):
+            if label == pos_class:
+                pos_idx = idx
+            elif label == neg_class:
+                neg_idx = idx
+
+        # 2. Check negative prefix first (not_, non_) to avoid substring collision
+        if pos_idx is None or neg_idx is None:
+            for idx, label in enumerate(labels):
+                if label.startswith("not_") or label.startswith("non_") or "not" in label or "non" in label:
+                    if neg_idx is None:
+                        neg_idx = idx
+                elif pos_class in label or any(p in label for p in ["yes", "pos", "target"]):
+                    if pos_idx is None:
+                        pos_idx = idx
+
+        # 3. Two-class fallback if labels were customized
+        if (pos_idx is None or neg_idx is None) and len(labels) == 2:
+            neg_idx = 0 if any(n in labels[0] for n in ["not", "non", "no", "neg"]) else 1
+            pos_idx = 1 if neg_idx == 0 else 0
+
+        if pos_idx is None or neg_idx is None or pos_idx == neg_idx:
+            raise ValueError(
+                f"Could not map model labels {labels} to stage '{stage}' classes ('{pos_class}', '{neg_class}')."
+            )
+
+        return pos_idx, neg_idx
 
     def preprocess_image(
         self, image_path: str, target_size: Tuple[int, int] = (224, 224)
@@ -129,14 +174,18 @@ class ModelEvaluator:
             output_details = interpreter.get_output_details()
 
             def predict(arr: np.ndarray) -> np.ndarray:
-                interpreter.set_tensor(input_details[0]["index"], arr)
+                # Support quantized models if uint8 expected
+                if input_details[0]["dtype"] == np.uint8:
+                    arr_q = ((arr + 1.0) * 127.5).astype(np.uint8)
+                    interpreter.set_tensor(input_details[0]["index"], arr_q)
+                else:
+                    interpreter.set_tensor(input_details[0]["index"], arr)
                 interpreter.invoke()
                 return interpreter.get_tensor(output_details[0]["index"])
 
             return predict
         else:
             import tensorflow as tf
-            # Load Keras model with compile=False for safety
             model = tf.keras.models.load_model(model_path, compile=False)
             return lambda arr: model.predict(arr, verbose=0)
 
@@ -150,79 +199,68 @@ class ModelEvaluator:
         pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
         neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            model_path, labels = self.unpack_model_zip(zip_bytes_or_path, temp_dir)
-            predict_fn = self._load_predictor(model_path)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                model_path, labels = self.unpack_model_zip(zip_bytes_or_path, temp_dir)
+                predict_fn = self._load_predictor(model_path)
 
-            # Match model labels to our stage binary classes
-            pos_idx: Optional[int] = None
-            neg_idx: Optional[int] = None
-            for idx, label in enumerate(labels):
-                if label == pos_class or pos_class in label:
-                    pos_idx = idx
-                elif label == neg_class or neg_class in label:
-                    neg_idx = idx
+                pos_idx, neg_idx = self.resolve_class_indices(labels, stage)
 
-            # Fallback if label names were customized but exactly 2 classes exist
-            if (pos_idx is None or neg_idx is None) and len(labels) == 2:
-                # Default index 0 to positive or check common tokens
-                pos_idx = 0 if any(p in labels[0] for p in ["plant", "invasive", "yes", "pos"]) else 1
-                neg_idx = 1 if pos_idx == 0 else 0
+                # Gather test samples
+                y_true: List[int] = []
+                y_pred: List[int] = []
+                errors: List[Dict[str, Any]] = []
 
-            if pos_idx is None:
-                raise ValueError(
-                    f"Could not map model labels {labels} to stage '{stage}' classes ('{pos_class}', '{neg_class}')."
-                )
-
-            # Gather test samples
-            y_true: List[int] = []
-            y_pred: List[int] = []
-            errors: List[Dict[str, Any]] = []
-
-            for cls_name, true_binary in [(neg_class, 0), (pos_class, 1)]:
-                cls_folder = os.path.join(self.test_dataset_dir, stage, cls_name)
-                if not os.path.exists(cls_folder):
-                    continue
-
-                for fname in sorted(os.listdir(cls_folder)):
-                    if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                        continue
-                    img_path = os.path.join(cls_folder, fname)
-                    try:
-                        arr = self.preprocess_image(img_path)
-                        preds = predict_fn(arr)[0]
-                        pred_label_idx = int(np.argmax(preds))
-                        confidence = float(np.max(preds))
-                        pred_binary = 1 if pred_label_idx == pos_idx else 0
-
-                        y_true.append(true_binary)
-                        y_pred.append(pred_binary)
-
-                        if pred_binary != true_binary:
-                            errors.append({
-                                "filename": fname,
-                                "image_path": img_path,
-                                "true_label": cls_name,
-                                "predicted_label": pos_class if pred_binary == 1 else neg_class,
-                                "confidence": round(confidence, 4),
-                                "error_type": "False Positive" if pred_binary == 1 else "False Negative",
-                            })
-                    except Exception:
-                        # Skip corrupt images gracefully as per Review Focus
+                for cls_name, true_binary in [(neg_class, 0), (pos_class, 1)]:
+                    cls_folder = os.path.join(self.test_dataset_dir, stage, cls_name)
+                    if not os.path.exists(cls_folder):
                         continue
 
-            if not y_true:
-                raise ValueError(
-                    f"No test images found in '{self.test_dataset_dir}/{stage}'. Please run Dataset Admin to create test splits first."
-                )
+                    for fname in sorted(os.listdir(cls_folder)):
+                        if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                            continue
+                        img_path = os.path.join(cls_folder, fname)
+                        try:
+                            arr = self.preprocess_image(img_path)
+                            preds = predict_fn(arr)[0]
+                            pred_label_idx = int(np.argmax(preds))
+                            confidence = float(np.max(preds))
+                            pred_binary = 1 if pred_label_idx == pos_idx else 0
 
-            metrics = self.compute_binary_metrics(y_true, y_pred, class_names=[neg_class, pos_class])
-            # Sort errors by confidence descending (highest confidence mistakes first)
-            errors.sort(key=lambda x: x["confidence"], reverse=True)
+                            y_true.append(true_binary)
+                            y_pred.append(pred_binary)
 
-            return {
-                "stage": stage,
-                "labels": labels,
-                "metrics": metrics,
-                "errors": errors[:10],  # Top 10 bloopers
-            }
+                            if pred_binary != true_binary:
+                                errors.append({
+                                    "filename": fname,
+                                    "image_path": img_path,
+                                    "true_label": cls_name,
+                                    "predicted_label": pos_class if pred_binary == 1 else neg_class,
+                                    "confidence": round(confidence, 4),
+                                    "error_type": "False Positive" if pred_binary == 1 else "False Negative",
+                                })
+                        except Exception:
+                            continue
+
+                if not y_true:
+                    raise ValueError(
+                        f"No test images found in '{self.test_dataset_dir}/{stage}'. Please run Dataset Admin to create test splits first."
+                    )
+
+                metrics = self.compute_binary_metrics(y_true, y_pred, class_names=[neg_class, pos_class])
+                errors.sort(key=lambda x: x["confidence"], reverse=True)
+
+                return {
+                    "stage": stage,
+                    "labels": labels,
+                    "metrics": metrics,
+                    "errors": errors[:10],
+                }
+        finally:
+            # Prevent TensorFlow memory leak on repeated submissions
+            try:
+                import tensorflow as tf
+                tf.keras.backend.clear_session()
+            except Exception:
+                pass
+            gc.collect()

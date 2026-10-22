@@ -258,24 +258,9 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
 
         with st.spinner("Simulating robot traversal across field samples..."):
             try:
-                res1 = evaluator.evaluate_submission(stage1_file.read(), stage="stage1")
-                res2 = evaluator.evaluate_submission(stage2_file.read(), stage="stage2")
-
-                f1_combined = (res1["metrics"]["f1"] + res2["metrics"]["f1"]) / 2.0
-                acc_combined = (res1["metrics"]["accuracy"] + res2["metrics"]["accuracy"]) / 2.0
-
-                pipeline_metrics = {
-                    "f1": round(f1_combined, 4),
-                    "accuracy": round(acc_combined, 4),
-                    "stage1_f1": res1["metrics"]["f1"],
-                    "stage2_f1": res2["metrics"]["f1"],
-                    "stage1_acc": res1["metrics"]["accuracy"],
-                    "stage2_acc": res2["metrics"]["accuracy"],
-                    "tp": res2["metrics"]["tp"],
-                    "fp": res2["metrics"]["fp"],
-                    "tn": res1["metrics"]["tn"],
-                    "fn": res2["metrics"]["fn"],
-                }
+                pe = PipelineEvaluator(evaluator)
+                pipeline_run = pe.evaluate_pipeline(stage1_file.read(), stage2_file.read())
+                pipeline_metrics = pipeline_run["metrics"]
 
                 storage.save_run({
                     "stage": "pipeline",
@@ -283,13 +268,18 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
                     "model_version": version_label or "Pipeline v1",
                     "notes": "Cascaded Field Robot Test",
                     "metrics": pipeline_metrics,
-                    "errors": res1["errors"] + res2["errors"],
+                    "errors": pipeline_run["errors"],
                 })
 
-                st.success(f"🎉 Field Robot Test Complete! Combined F1: {f1_combined:.3f} | Combined Accuracy: {acc_combined * 100:.1f}%")
+                st.success(
+                    f"🎉 Field Robot Test Complete! Combined F1: {pipeline_metrics['f1']:.3f} | "
+                    f"Accuracy: {pipeline_metrics['accuracy'] * 100:.1f}% | "
+                    f"Precision: {pipeline_metrics['precision']:.3f} | "
+                    f"Recall: {pipeline_metrics['recall']:.3f}"
+                )
                 c1, c2 = st.columns(2)
-                c1.metric("🌿 Stage 1 Gatekeeper Accuracy", f"{res1['metrics']['accuracy'] * 100:.1f}%")
-                c2.metric("⚠️ Stage 2 Invasive Detector Accuracy", f"{res2['metrics']['accuracy'] * 100:.1f}%")
+                c1.metric("🌿 Stage 1 Accuracy", f"{pipeline_metrics['stage1_acc'] * 100:.1f}%")
+                c2.metric("⚠️ Stage 2 Accuracy", f"{pipeline_metrics['stage2_acc'] * 100:.1f}%")
 
             except Exception as e:
                 st.error(f"Pipeline Execution Error: {str(e)}")
