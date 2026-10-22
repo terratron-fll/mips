@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide",
 )
 
-def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str):
+def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: str = "cm_chart"):
     tp = metrics.get("tp", 0)
     fp = metrics.get("fp", 0)
     fn = metrics.get("fn", 0)
@@ -45,7 +45,7 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str):
         height=320,
         coloraxis_showscale=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label: str, neg_label: str):
     st.header(f"{stage_name} Leaderboard")
@@ -135,7 +135,7 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
             markers=True,
             title="Team F1-Score Progress",
         )
-        st.plotly_chart(fig_line, use_container_width=True)
+        st.plotly_chart(fig_line, use_container_width=True, key=f"progress_chart_{stage}")
 
     # Detailed inspection of top run
     if leaderboard:
@@ -143,7 +143,12 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
         st.subheader(f"🔍 Inspecting Rank #1: {top_run.get('team_name')} ({top_run.get('model_version')})")
         col_cm, col_err = st.columns([1, 1])
         with col_cm:
-            render_confusion_matrix(top_run.get("metrics", {}), pos_label=pos_label, neg_label=neg_label)
+            render_confusion_matrix(
+                top_run.get("metrics", {}),
+                pos_label=pos_label,
+                neg_label=neg_label,
+                key=f"board_cm_{stage}",
+            )
 
         with col_err:
             st.write("<b>Bloopers Gallery (Top False Alarms & Missed Weeds):</b>", unsafe_allow_html=True)
@@ -231,7 +236,12 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
                 neg_label = "not_cat" if stage == "intro" else ("not_plant" if stage == "stage1" else "non_invasive")
 
                 with col_res1:
-                    render_confusion_matrix(metrics, pos_label=pos_label, neg_label=neg_label)
+                    render_confusion_matrix(
+                        metrics,
+                        pos_label=pos_label,
+                        neg_label=neg_label,
+                        key=f"submit_cm_{stage}",
+                    )
                 with col_res2:
                     st.write("<b>Your Model's Bloopers (Errors to study for next time):</b>", unsafe_allow_html=True)
                     if not errors:
