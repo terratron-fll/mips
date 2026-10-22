@@ -110,7 +110,51 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
         })
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Build ordered list of inspectable run objects matching the table rows
+    inspectable_runs = []
+    if gemini_entry:
+        inspectable_runs.append({
+            "label": "🤖 Benchmark: Gemini 2.5 Flash (Zero-Shot VLM)",
+            "run": gemini_entry,
+        })
+
+    for rank, run in enumerate(leaderboard, 1):
+        team = run.get("team_name", "Team")
+        ver = run.get("model_version", "")
+        f1 = run.get("metrics", {}).get("f1", 0.0)
+        inspectable_runs.append({
+            "label": f"#{rank}: {team} ({ver}) — F1: {f1:.3f}",
+            "run": run,
+        })
+
+    st.caption("💡 **Tip:** Click on any row in the table below to inspect its Confusion Matrix & Bloopers!")
+    selection = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"leaderboard_table_{stage}",
+    )
+
+    # Determine which run is selected
+    selected_idx = 0
+    if selection:
+        sel = getattr(selection, "selection", selection)
+        if isinstance(sel, dict):
+            selected_rows = sel.get("rows", [])
+        else:
+            selected_rows = getattr(sel, "rows", [])
+        if selected_rows and len(selected_rows) > 0:
+            row_clicked = selected_rows[0]
+            if 0 <= row_clicked < len(inspectable_runs):
+                selected_idx = row_clicked
+                st.session_state[f"selected_run_idx_{stage}"] = selected_idx
+        elif f"selected_run_idx_{stage}" in st.session_state:
+            saved_idx = st.session_state[f"selected_run_idx_{stage}"]
+            if 0 <= saved_idx < len(inspectable_runs):
+                selected_idx = saved_idx
 
     # Hill-climbing line chart
     st.subheader("📈 Hill-Climbing Progress Over Time")
@@ -137,32 +181,57 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
         )
         st.plotly_chart(fig_line, use_container_width=True, key=f"progress_chart_{stage}")
 
-    # Detailed inspection of top run
-    if leaderboard:
-        top_run = leaderboard[0]
-        st.subheader(f"🔍 Inspecting Rank #1: {top_run.get('team_name')} ({top_run.get('model_version')})")
+    # Detailed inspection of selected run
+    if inspectable_runs:
+        st.divider()
+        st.subheader("🔍 Run Deep Dive & Bloopers Inspection")
+
+        chosen_idx = st.selectbox(
+            "👉 Select a submission to inspect its Confusion Matrix & Bloopers:",
+            options=list(range(len(inspectable_runs))),
+            format_func=lambda i: inspectable_runs[i]["label"],
+            index=selected_idx,
+            key=f"select_run_sb_{stage}",
+        )
+        if chosen_idx != selected_idx:
+            st.session_state[f"selected_run_idx_{stage}"] = chosen_idx
+            selected_idx = chosen_idx
+
+        target_item = inspectable_runs[selected_idx]
+        target_run = target_item["run"]
+
+        notes = target_run.get("notes")
+        if notes:
+            st.info(f"📝 **Team Hypothesis & Experiment Notes:** {notes}")
+
         col_cm, col_err = st.columns([1, 1])
         with col_cm:
             render_confusion_matrix(
-                top_run.get("metrics", {}),
+                target_run.get("metrics", {}),
                 pos_label=pos_label,
                 neg_label=neg_label,
-                key=f"board_cm_{stage}",
+                key=f"board_cm_{stage}_{selected_idx}",
             )
 
         with col_err:
-            st.write("<b>Bloopers Gallery (Top False Alarms & Missed Weeds):</b>", unsafe_allow_html=True)
-            errors = top_run.get("errors", [])
+            st.write("<b>Bloopers Gallery (Model Errors on Test Dataset):</b>", unsafe_allow_html=True)
+            errors = target_run.get("errors", [])
             if not errors:
                 st.success("🎉 Perfect score! No errors found on the test dataset.")
             else:
-                for err in errors[:3]:
-                    err_path = err.get("image_path")
-                    caption = f"{err.get('error_type')}: True='{err.get('true_label')}', Pred='{err.get('predicted_label')}' (Conf: {err.get('confidence')})"
-                    if err_path and os.path.exists(err_path):
-                        st.image(err_path, caption=caption, width=200)
-                    else:
-                        st.write(f"- {caption} ({err.get('filename')})")
+                st.caption(f"Showing up to 6 mistakes ({len(errors)} total errors):")
+                err_cols = st.columns(min(3, len(errors)))
+                for idx, err in enumerate(errors[:6]):
+                    ecol = err_cols[idx % len(err_cols)]
+                    with ecol:
+                        err_path = err.get("image_path")
+                        conf = err.get("confidence")
+                        conf_str = f" ({conf * 100:.1f}%)" if conf is not None else ""
+                        caption = f"{err.get('error_type')}: True='{err.get('true_label')}', Pred='{err.get('predicted_label')}'{conf_str}"
+                        if err_path and os.path.exists(err_path):
+                            st.image(err_path, caption=caption, use_container_width=True)
+                        else:
+                            st.write(f"- {caption} ({err.get('filename')})")
 
 def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     st.header("📤 Submit Your Teachable Machine Model")
