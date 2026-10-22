@@ -89,3 +89,46 @@ def test_preprocess_image(tmp_path):
     assert arr.shape == (1, 224, 224, 3)
     assert -1.01 <= np.min(arr) <= 1.01
     assert -1.01 <= np.max(arr) <= 1.01
+
+def test_fix_h5_depthwise_conv_strips_groups(tmp_path):
+    import h5py
+    import json
+
+    h5_file = str(tmp_path / "test_model.h5")
+    mock_config = {
+        "class_name": "Sequential",
+        "config": {
+            "layers": [
+                {
+                    "class_name": "DepthwiseConv2D",
+                    "config": {
+                        "name": "expanded_conv_depthwise",
+                        "groups": 1,
+                        "depth_multiplier": 1,
+                        "kernel_size": [3, 3],
+                    },
+                },
+                {
+                    "class_name": "Conv2D",
+                    "config": {
+                        "name": "conv2d_1",
+                        "groups": 1,
+                    },
+                },
+            ]
+        },
+    }
+
+    with h5py.File(h5_file, "w") as f:
+        f.attrs["model_config"] = json.dumps(mock_config)
+
+    # Apply the patch
+    ModelEvaluator.fix_h5_depthwise_conv(h5_file)
+
+    # Verify that 'groups' was removed from DepthwiseConv2D but preserved elsewhere
+    with h5py.File(h5_file, "r") as f:
+        saved_config = json.loads(f.attrs["model_config"])
+        layers = saved_config["config"]["layers"]
+        assert "groups" not in layers[0]["config"]
+        assert layers[0]["config"]["depth_multiplier"] == 1
+        assert layers[1]["config"]["groups"] == 1

@@ -162,6 +162,48 @@ class ModelEvaluator:
             "total_samples": int(total),
         }
 
+    @staticmethod
+    def fix_h5_depthwise_conv(model_path: str) -> None:
+        """Removes incompatible 'groups' parameter from DepthwiseConv2D configs in
+
+        Google Teachable Machine .h5 exports when loaded in modern Keras / TensorFlow.
+        """
+        try:
+            import h5py
+            import json
+
+            with h5py.File(model_path, "r+") as f:
+                config_key = None
+                if "model_config" in f.attrs:
+                    config_key = "model_config"
+                elif "config" in f.attrs:
+                    config_key = "config"
+
+                if not config_key:
+                    return
+
+                raw_config = f.attrs[config_key]
+                if isinstance(raw_config, bytes):
+                    raw_config = raw_config.decode("utf-8")
+
+                model_config = json.loads(raw_config)
+
+                def clean_node(node: Any) -> None:
+                    if isinstance(node, dict):
+                        if node.get("class_name") == "DepthwiseConv2D":
+                            if "config" in node and isinstance(node["config"], dict):
+                                node["config"].pop("groups", None)
+                        for val in node.values():
+                            clean_node(val)
+                    elif isinstance(node, list):
+                        for item in node:
+                            clean_node(item)
+
+                clean_node(model_config)
+                f.attrs[config_key] = json.dumps(model_config)
+        except Exception:
+            pass
+
     def _load_predictor(self, model_path: str):
         if model_path.endswith(".tflite"):
             try:
@@ -187,7 +229,29 @@ class ModelEvaluator:
             return predict
         else:
             import tensorflow as tf
-            model = tf.keras.models.load_model(model_path, compile=False)
+
+            # 1. Patch H5 model config on disk to strip 'groups': 1 from DepthwiseConv2D
+            self.fix_h5_depthwise_conv(model_path)
+
+            # 2. Provide custom DepthwiseConv2D layer that ignores 'groups'
+            custom_objects = {}
+            try:
+                class PatchedDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
+                    def __init__(self, *args, **kwargs):
+                        kwargs.pop("groups", None)
+                        super().__init__(*args, **kwargs)
+
+                custom_objects["DepthwiseConv2D"] = PatchedDepthwiseConv2D
+            except Exception:
+                pass
+
+            try:
+                model = tf.keras.models.load_model(
+                    model_path, compile=False, custom_objects=custom_objects
+                )
+            except Exception:
+                model = tf.keras.models.load_model(model_path, compile=False)
+
             return lambda arr: model.predict(arr, verbose=0)
 
     def evaluate_submission(

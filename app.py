@@ -162,13 +162,31 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
 def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     st.header("📤 Submit Your Teachable Machine Model")
-    st.markdown(
-        """
-        1. Train your model in [Google Teachable Machine](https://teachablemachine.withgoogle.com/).
-        2. Click **Export Model** -> **TensorFlow** -> **Keras** (or **TensorFlow Lite**) -> **Download my model**.
-        3. Upload your downloaded `.zip` file below!
-        """
-    )
+
+    with st.expander("❓ Exactly Which Export Option to Pick in Google Teachable Machine", expanded=True):
+        st.markdown(
+            """
+            Google Teachable Machine has three export tabs (**TensorFlow.js**, **TensorFlow**, and **TensorFlow Lite**).  
+            **Pick ONE of these two supported options:**
+
+            * 🥇 **Option 1 (Recommended): TensorFlow $\\rightarrow$ Keras**
+              * Click the **TensorFlow** tab.
+              * Select the **Keras** radio button.
+              * Click **Download my model** (downloads a `.zip` containing `keras_model.h5` and `labels.txt`).
+            
+            * 🥈 **Option 2 (Lightweight / Fast): TensorFlow Lite $\\rightarrow$ Floating point**
+              * Click the **TensorFlow Lite** tab.
+              * Select the **Floating point** radio button.
+              * Click **Download my model** (downloads a `.zip` containing `model_unquant.tflite` and `labels.txt`).
+
+            ---
+            **❌ What NOT to pick (and why):**
+            * ❌ **TensorFlow.js**: This exports a web `model.json` bundle designed to run inside JavaScript browser apps, not Python evaluation backends.
+            * ❌ **TensorFlow $\\rightarrow$ SavedModel**: Creates a multi-file folder directory (`saved_model.pb`) rather than a single portable model file.
+            * ❌ **TensorFlow Lite $\\rightarrow$ EdgeTPU**: Only runs on specialized Google Coral microchips; fails on standard computer processors.
+            * ⚠️ **TensorFlow Lite $\\rightarrow$ Quantized**: Supported, but slightly lower accuracy than Floating point.
+            """
+        )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -429,13 +447,30 @@ def main():
         st.markdown(
             """
             > **Welcome to the MIPS Machine Learning Tutorial!** 🎓  
-            > Before classifying invasive plants, practice the entire process using the famous **Cat vs. Not-Cat** dataset.  
-            > 1. Download `intro_train.zip` from the **Coach Dataset Admin** tab (or ask your coach).  
-            > 2. Open [Google Teachable Machine](https://teachablemachine.withgoogle.com/) and create an Image Project.  
-            > 3. Add `cat` and `not_cat` classes, train, and export your model.  
-            > 4. Submit it in the **Submit Model** tab to see your score on this leaderboard!
+            > Practice the entire machine learning workflow using the **Cat vs. Not-Cat** dataset before moving to invasive plants.  
+            > 
+            > ⚠️ **Important Step for Google Teachable Machine:**  
+            > Teachable Machine accepts **image files**, not `.zip` files!  
+            > 1. **Download & UNZIP** `intro_train.zip` on your computer (double-click it to extract the `cat` and `not_cat` folders).  
+            > 2. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/).  
+            > 3. Name your classes `cat` and `not_cat`, then drag/upload the images from each folder into its matching class.  
+            > 4. Click **Train Model**, then **Export Model**:  
+            >    - **Option 1 (Recommended):** **TensorFlow** tab $\\rightarrow$ select **Keras** $\\rightarrow$ **Download my model**.  
+            >    - **Option 2 (Fast):** **TensorFlow Lite** tab $\\rightarrow$ select **Floating point** $\\rightarrow$ **Download my model**.  
+            >    - *(Do not pick TensorFlow.js, SavedModel, or EdgeTPU).*  
+            > 5. Upload that downloaded `.zip` file in the **📤 Submit Model** tab to evaluate!
             """
         )
+        p0 = os.path.join(dataset_mgr.packs_dir, "intro_train.zip")
+        if os.path.exists(p0):
+            with open(p0, "rb") as f:
+                st.download_button(
+                    label="📥 Download Tutorial Training Pack (intro_train.zip)",
+                    data=f.read(),
+                    file_name="intro_train.zip",
+                    mime="application/zip",
+                    key="dl_intro_tab",
+                )
         render_board(storage, stage="intro", stage_name="🐱 Tutorial: Cat vs Not-Cat", pos_label="cat", neg_label="not_cat")
 
     with tab_b1:

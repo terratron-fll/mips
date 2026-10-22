@@ -33,12 +33,16 @@ Open your browser to `http://localhost:8501`. (On team Wi-Fi, other students can
 
 ## 🧑‍🎓 Student Workflow (Ages 9–11)
 1. Download a training pack (`intro_train.zip`, `stage1_train.zip`, or `stage2_train.zip`) from MIPS.
-2. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/).
-3. Drag training photos into the two classes.
-4. Click **Train Model**.
-5. Click **Export Model** $\rightarrow$ **TensorFlow** $\rightarrow$ **Keras** (or **TensorFlow Lite**) $\rightarrow$ **Download my model**.
-6. In MIPS, open the **Submit Model** tab, enter your Team Name & experiment notes, drop the exported `.zip` file, and see your rank on the Leaderboard!
-7. Study the **Confusion Matrix** and **Bloopers Gallery** to see what mistakes the model made.
+2. **Unzip the downloaded `.zip` file** on your computer (double-click it). This gives you the class folders containing the individual training photos.
+3. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/) and create a Standard Image Project.
+4. Rename the classes (e.g., `cat` and `not_cat`), click **Upload**, and drag or select the photos from each unzipped folder into its matching class.
+5. Click **Train Model**.
+6. Click **Export Model** and pick one of these formats:
+   - **Recommended:** **TensorFlow** tab $\rightarrow$ **Keras** $\rightarrow$ **Download my model** (downloads `keras_model.h5` + `labels.txt`).
+   - **Fast / Lightweight:** **TensorFlow Lite** tab $\rightarrow$ **Floating point** $\rightarrow$ **Download my model** (downloads `model_unquant.tflite` + `labels.txt`).
+   - *(Note: Do not pick TensorFlow.js, SavedModel, or EdgeTPU).*
+7. In MIPS, open the **Submit Model** tab, enter your Team Name & experiment notes, drop the exported model `.zip` file, and see your rank on the Leaderboard!
+8. Study the **Confusion Matrix** and **Bloopers Gallery** to see what mistakes the model made.
 
 ---
 
