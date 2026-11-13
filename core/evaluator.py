@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
+from core.dataset_config import DatasetConfig
+
+
 class ModelEvaluator:
     """Evaluates student Google Teachable Machine models on locked test datasets."""
 
@@ -20,8 +23,33 @@ class ModelEvaluator:
         "stage2": {"invasive": 1, "non_invasive": 0},
     }
 
-    def __init__(self, test_dataset_dir: str = "data/test_dataset") -> None:
+    def __init__(
+        self,
+        test_dataset_dir: str = "data/test_dataset",
+        dataset_config: Optional[DatasetConfig] = None,
+    ) -> None:
         self.test_dataset_dir = test_dataset_dir
+        self.dataset_config = dataset_config
+
+    def _get_stage_classes(self, stage: str) -> Tuple[str, str]:
+        """Return (pos_class, neg_class) for a stage from dataset_config or STAGE_TARGETS."""
+        if self.dataset_config is not None:
+            if stage not in self.dataset_config.stages:
+                raise ValueError(
+                    f"Unknown stage '{stage}' for dataset '{self.dataset_config.id}'. "
+                    f"Expected one of {list(self.dataset_config.stages.keys())}"
+                )
+            sc = self.dataset_config.stages[stage]
+            return sc.pos_label, sc.neg_label
+
+        if stage not in self.STAGE_TARGETS:
+            raise ValueError(
+                f"Unknown stage: {stage}. Expected one of {list(self.STAGE_TARGETS.keys())}"
+            )
+        stage_mapping = self.STAGE_TARGETS[stage]
+        pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
+        neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
+        return pos_class, neg_class
 
     def sanitize_labels(self, raw_lines: List[str]) -> List[str]:
         cleaned: List[str] = []
@@ -81,12 +109,7 @@ class ModelEvaluator:
         return model_path, labels
 
     def resolve_class_indices(self, labels: List[str], stage: str) -> Tuple[int, int]:
-        if stage not in self.STAGE_TARGETS:
-            raise ValueError(f"Unknown stage: {stage}")
-
-        stage_mapping = self.STAGE_TARGETS[stage]
-        pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
-        neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
+        pos_class, neg_class = self._get_stage_classes(stage)
 
         pos_idx: Optional[int] = None
         neg_idx: Optional[int] = None
@@ -273,12 +296,7 @@ class ModelEvaluator:
         stage: str = "stage1",
         save_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if stage not in self.STAGE_TARGETS:
-            raise ValueError(f"Unknown stage: {stage}. Expected one of {list(self.STAGE_TARGETS.keys())}")
-
-        stage_mapping = self.STAGE_TARGETS[stage]
-        pos_class = [k for k, v in stage_mapping.items() if v == 1][0]
-        neg_class = [k for k, v in stage_mapping.items() if v == 0][0]
+        pos_class, neg_class = self._get_stage_classes(stage)
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir:

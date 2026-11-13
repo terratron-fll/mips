@@ -11,3 +11,5 @@ data/train_dataset/
 data/training_packs/
 data/leaderboard_history.json
 data/models/
+data/datasets/
+data/gemini_cache/

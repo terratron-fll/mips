@@ -8,8 +8,17 @@ class PipelineEvaluator:
     and Stage 2 (Invasive Classifier).
     """
 
-    def __init__(self, evaluator: ModelEvaluator = None) -> None:
-        self.evaluator = evaluator or ModelEvaluator()
+    def __init__(
+        self,
+        evaluator: Optional[ModelEvaluator] = None,
+        test_dataset_dir: Optional[str] = None,
+    ) -> None:
+        if evaluator is not None:
+            self.evaluator = evaluator
+        elif test_dataset_dir is not None:
+            self.evaluator = ModelEvaluator(test_dataset_dir=test_dataset_dir)
+        else:
+            self.evaluator = ModelEvaluator()
 
     def combine_predictions(
         self,

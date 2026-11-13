@@ -8,18 +8,73 @@ from PIL import Image
 import plotly.express as px
 import streamlit as st
 
+from core.dataset_config import DatasetConfig, DatasetRegistry, StageConfig
 from core.dataset_manager import DatasetManager
 from core.evaluator import ModelEvaluator
 from core.gemini_benchmark import GeminiBenchmarkRunner
 from core.pipeline import PipelineEvaluator
-from core.storage import StorageManager
+from core.r2_sync import R2SyncManager
+from core.storage import StorageManager, verify_admin_password
 from scripts.seed_intro_data import seed_cat_dataset
 
 st.set_page_config(
-    page_title="MIPS: Invasive Plants ML Leaderboard",
+    page_title="MIPS: Machine Learning Leaderboard",
     page_icon="🌿",
     layout="wide",
 )
+
+
+@st.cache_resource
+def get_r2_sync() -> R2SyncManager:
+    try:
+        secrets = st.secrets
+    except Exception:
+        secrets = {}
+    sync = R2SyncManager.from_secrets(secrets, local_data_dir="data")
+    if sync.is_configured():
+        sync.pull_metadata()
+    return sync
+
+
+def ensure_dataset_synced(r2_sync: R2SyncManager, dataset_id: str, force: bool = False) -> None:
+    if not r2_sync.is_configured():
+        return
+    pulled = st.session_state.setdefault("pulled_datasets", set())
+    if force or dataset_id not in pulled:
+        r2_sync.pull_dataset_prefix(dataset_id, "test_dataset")
+        r2_sync.pull_dataset_prefix(dataset_id, "gemini_cache")
+        pulled.add(dataset_id)
+
+
+def is_admin_unlocked() -> bool:
+    return bool(st.session_state.get("gemini_admin_unlocked", False))
+
+
+def render_admin_gate(key_prefix: str) -> bool:
+    if is_admin_unlocked():
+        col_a, col_b = st.columns([4, 1])
+        col_a.success("🔓 Admin Unlocked (Live Gemini & Force Re-Split enabled)")
+        if col_b.button("🔒 Lock", key=f"{key_prefix}_lock"):
+            st.session_state["gemini_admin_unlocked"] = False
+            st.rerun()
+        return True
+
+    with st.expander("🔐 Admin Unlock Required (Teacher / TA)", expanded=False):
+        pwd = st.text_input("Admin Password", type="password", key=f"{key_prefix}_pwd")
+        if st.button("Unlock Admin Controls", key=f"{key_prefix}_unlock"):
+            try:
+                expected = st.secrets.get("GEMINI_ADMIN_PASSWORD", "")
+            except Exception:
+                expected = ""
+            if not expected:
+                expected = os.environ.get("GEMINI_ADMIN_PASSWORD", "")
+            if verify_admin_password(pwd, expected):
+                st.session_state["gemini_admin_unlocked"] = True
+                st.success("Admin unlocked!")
+                st.rerun()
+            else:
+                st.error("Invalid password or GEMINI_ADMIN_PASSWORD not configured.")
+    return False
 
 def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: str = "cm_chart"):
     tp = metrics.get("tp", 0)
@@ -100,16 +155,33 @@ def render_confusion_matrix(metrics: dict, pos_label: str, neg_label: str, key: 
     else:
         st.markdown(card_html, unsafe_allow_html=True)
 
-def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label: str, neg_label: str):
+def render_board(
+    storage: StorageManager,
+    dataset_config: DatasetConfig,
+    stage: str,
+    stage_name: str,
+    pos_label: str,
+    neg_label: str,
+    r2_sync: Optional[R2SyncManager] = None,
+):
     st.header(f"{stage_name} Leaderboard")
-    leaderboard = storage.get_leaderboard(stage=stage)
+    current_split = dataset_config.split_version
+    split_choice = st.radio(
+        "Test Split Version",
+        options=["current", "all"],
+        format_func=lambda x: f"Current Split (v{current_split})" if x == "current" else "All Split Versions",
+        horizontal=True,
+        key=f"split_filter_{dataset_config.id}_{stage}",
+    )
+    split_filter = current_split if split_choice == "current" else None
+    leaderboard = storage.get_leaderboard(stage=stage, split_version=split_filter)
 
     # Check for cached Gemini benchmarks
-    gemini_runner = GeminiBenchmarkRunner()
+    gemini_runner = GeminiBenchmarkRunner(dataset_config=dataset_config, r2_sync=r2_sync)
     gemini_entries = gemini_runner.get_stage_benchmarks(stage)
 
     if not leaderboard and not gemini_entries:
-        st.info(f"No models submitted to {stage_name} yet. Be the first team to submit!")
+        st.info(f"No models submitted to {stage_name} (split v{current_split}) yet. Be the first team to submit!")
         return
 
     # Top summary metrics
@@ -132,6 +204,7 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
             "Rank": "🤖 BENCHMARK",
             "Team": gemini_label,
             "Version": gemini_version,
+            "Split": f"v{gemini_entry.get('split_version', current_split)}",
             "F1-Score": f"{gm.get('f1', 0.0):.3f}",
             "Accuracy": f"{gm.get('accuracy', 0.0) * 100:.1f}%",
             "Precision": f"{gm.get('precision', 0.0):.3f}",
@@ -151,6 +224,7 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
             "Rank": f"#{rank}",
             "Team": run.get("team_name", ""),
             "Version": run.get("model_version", ""),
+            "Split": f"v{run.get('split_version', 1)}",
             "F1-Score": f"{m.get('f1', 0.0):.3f}",
             "Accuracy": f"{m.get('accuracy', 0.0) * 100:.1f}%",
             "Precision": f"{m.get('precision', 0.0):.3f}",
@@ -214,7 +288,7 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
     # Hill-climbing line chart
     st.subheader("📈 Hill-Climbing Progress Over Time")
-    history = storage.get_history(stage=stage)
+    history = storage.get_history(stage=stage, split_version=split_filter)
     chart_data = []
     for h in history:
         m = h.get("metrics", {})
@@ -330,8 +404,14 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
                         else:
                             st.write(f"- {caption} ({err.get('filename')})")
 
-def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
-    st.header("📤 Submit Your Teachable Machine Model")
+def render_submit_tab(
+    storage: StorageManager,
+    evaluator: ModelEvaluator,
+    dataset_config: DatasetConfig,
+    dataset_mgr: DatasetManager,
+    r2_sync: Optional[R2SyncManager] = None,
+):
+    st.header(f"📤 Submit Your Teachable Machine Model ({dataset_config.icon} {dataset_config.name})")
 
     with st.expander("❓ Exactly Which Export Option to Pick in Google Teachable Machine", expanded=True):
         st.markdown(
@@ -355,15 +435,13 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
     with col1:
         team_name = st.text_input("Team Name", placeholder="e.g., Team Kudzu Hunters")
         model_version = st.text_input("Model Version", placeholder="e.g., v1.2")
+    stage_keys = list(dataset_config.stages.keys())
     with col2:
         stage = st.selectbox(
             "Which board are you submitting to?",
-            options=["intro", "stage1", "stage2"],
-            format_func=lambda x: {
-                "intro": "🐱 Tutorial: Cat vs Not-Cat",
-                "stage1": "🌿 Stage 1: Plant vs Not-Plant",
-                "stage2": "⚠️ Stage 2: Invasive vs Non-Invasive",
-            }[x],
+            options=stage_keys,
+            format_func=lambda x: dataset_config.stages[x].name,
+            key=f"submit_stage_{dataset_config.id}",
         )
         notes = st.text_input("Experiment Notes (What did you change?)", placeholder="e.g., Added 20 photos with sun glare and shadows")
 
@@ -379,16 +457,21 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
 
         with st.spinner("Unpacking model, loading locked test suite, and calculating ML metrics..."):
             try:
+                if r2_sync is not None and r2_sync.is_configured():
+                    ensure_dataset_synced(r2_sync, dataset_config.id)
                 zip_bytes = uploaded_zip.read()
                 run_id = f"run-{uuid.uuid4().hex[:8]}"
                 save_dir = os.path.join(storage.models_dir, run_id)
                 results = evaluator.evaluate_submission(zip_bytes, stage=stage, save_dir=save_dir)
+                storage.save_model_artifact(run_id, f"{run_id}.zip", zip_bytes)
 
                 metrics = results["metrics"]
                 errors = results["errors"]
 
                 run_record = {
                     "id": run_id,
+                    "dataset_id": dataset_config.id,
+                    "split_version": dataset_config.split_version,
                     "stage": stage,
                     "team_name": team_name,
                     "model_version": model_version or "v1.0",
@@ -402,8 +485,9 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
                 st.success(f"🎉 Evaluation Complete! F1-Score: {metrics['f1']:.3f} | Accuracy: {metrics['accuracy'] * 100:.1f}%")
 
                 col_res1, col_res2 = st.columns([1, 1])
-                pos_label = "cat" if stage == "intro" else ("plant" if stage == "stage1" else "invasive")
-                neg_label = "not_cat" if stage == "intro" else ("not_plant" if stage == "stage1" else "non_invasive")
+                sc = dataset_config.stages[stage]
+                pos_label = sc.pos_label
+                neg_label = sc.neg_label
 
                 with col_res1:
                     render_confusion_matrix(
@@ -428,8 +512,13 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
             except Exception as e:
                 st.error(f"Evaluation Error: {str(e)}")
 
-def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
-    st.header("🏆 Board 3: Field Robot Pipeline Simulation")
+def render_pipeline_board(
+    storage: StorageManager,
+    evaluator: ModelEvaluator,
+    dataset_config: DatasetConfig,
+    r2_sync: Optional[R2SyncManager] = None,
+):
+    st.header("🏆 Field Robot Pipeline Simulation")
     st.markdown(
         """
         **End-to-End Robotics Test:** Combines your Stage 1 Filter (*"Is it a plant?"*) with your 
@@ -452,20 +541,28 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
 
         with st.spinner("Simulating robot traversal across field samples..."):
             try:
+                if r2_sync is not None and r2_sync.is_configured():
+                    ensure_dataset_synced(r2_sync, dataset_config.id)
                 pe = PipelineEvaluator(evaluator)
                 run_id = f"run-{uuid.uuid4().hex[:8]}"
+                s1_bytes = stage1_file.read()
+                s2_bytes = stage2_file.read()
                 s1_save_dir = os.path.join(storage.models_dir, run_id, "stage1")
                 s2_save_dir = os.path.join(storage.models_dir, run_id, "stage2")
                 pipeline_run = pe.evaluate_pipeline(
-                    stage1_file.read(),
-                    stage2_file.read(),
+                    s1_bytes,
+                    s2_bytes,
                     stage1_save_dir=s1_save_dir,
                     stage2_save_dir=s2_save_dir,
                 )
+                storage.save_model_artifact(run_id, "stage1.zip", s1_bytes)
+                storage.save_model_artifact(run_id, "stage2.zip", s2_bytes)
                 pipeline_metrics = pipeline_run["metrics"]
 
                 storage.save_run({
                     "id": run_id,
+                    "dataset_id": dataset_config.id,
+                    "split_version": dataset_config.split_version,
                     "stage": "pipeline",
                     "team_name": team_name or "Terratron Robot",
                     "model_version": version_label or "Pipeline v1",
@@ -492,7 +589,18 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
                 st.error(f"Pipeline Execution Error: {str(e)}")
 
     st.subheader("Field Robot Simulation Leaderboard")
-    render_board(storage, stage="pipeline", stage_name="Field Robot", pos_label="invasive", neg_label="safe/harmless")
+    s2_stage = dataset_config.stages.get("stage2")
+    pos_l = s2_stage.pos_label if s2_stage else "invasive"
+    neg_l = f"not_{s2_stage.pos_label}" if s2_stage else "safe/harmless"
+    render_board(
+        storage,
+        dataset_config=dataset_config,
+        stage="pipeline",
+        stage_name="Field Robot",
+        pos_label=pos_l,
+        neg_label=neg_l,
+        r2_sync=r2_sync,
+    )
 
 STAGE_LABELS = {
     "intro": "🐱 Tutorial: Cat vs Not-Cat",
@@ -509,6 +617,8 @@ def render_training_pack_download(
     empty_message: Optional[str] = None,
 ):
     pack_path = os.path.join(dataset_mgr.packs_dir, f"{stage}_train.zip")
+    if not os.path.exists(pack_path) and dataset_mgr.r2_sync is not None and dataset_mgr.r2_sync.is_configured():
+        dataset_mgr.r2_sync.ensure_training_pack_local(dataset_mgr.dataset_config.id, stage)
     if os.path.exists(pack_path):
         with open(pack_path, "rb") as f:
             st.download_button(
@@ -525,38 +635,44 @@ def render_training_pack_download(
         )
 
 
-def render_dataset_tab(dataset_mgr: DatasetManager):
-    st.header("🗂️ Dataset Manager")
+def render_dataset_tab(
+    dataset_mgr: DatasetManager,
+    dataset_config: DatasetConfig,
+    registry: DatasetRegistry,
+):
+    st.header(f"🗂️ Dataset Manager — {dataset_config.icon} {dataset_config.name}")
+    st.caption(f"Dataset ID: `{dataset_config.id}` | Current Split Version: **v{dataset_config.split_version}**")
     st.markdown(
-        "Upload new training photos, inspect dataset counts, generate 70/30 train/test splits, "
+        "Upload new training photos, inspect dataset counts, generate incremental 70/30 train/test splits, "
         "and download student training packs."
     )
 
+    stage_keys = list(dataset_config.stages.keys())
     st.subheader("📸 Upload Photos to Dataset")
     up_col1, up_col2 = st.columns(2)
     with up_col1:
         upload_stage = st.selectbox(
             "Dataset Stage",
-            options=list(DatasetManager.STAGES.keys()),
-            format_func=lambda s: STAGE_LABELS.get(s, s),
-            key="dataset_upload_stage",
+            options=stage_keys,
+            format_func=lambda s: dataset_config.stages[s].name,
+            key=f"dataset_upload_stage_{dataset_config.id}",
         )
     with up_col2:
         upload_class = st.selectbox(
             "Class Label",
-            options=DatasetManager.STAGES[upload_stage],
+            options=dataset_config.stages[upload_stage].classes,
             format_func=lambda c: c.replace("_", " ").title(),
-            key="dataset_upload_class",
+            key=f"dataset_upload_class_{dataset_config.id}",
         )
 
     uploaded_photos = st.file_uploader(
         "Select photos to add (.jpg, .jpeg, .png, .webp)",
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
-        key="dataset_photo_uploader",
+        key=f"dataset_photo_uploader_{dataset_config.id}",
     )
 
-    if st.button("📤 Add Photos to Dataset", type="primary"):
+    if st.button("📤 Add Photos to Dataset", type="primary", key=f"add_photos_btn_{dataset_config.id}"):
         if not uploaded_photos:
             st.warning("Please select at least one photo to upload.")
         else:
@@ -567,7 +683,7 @@ def render_dataset_tab(dataset_mgr: DatasetManager):
             if saved_count:
                 st.success(
                     f"✅ Added {saved_count} photo(s) to `{upload_stage}/{upload_class}`! "
-                    "Click **⚡ Process & Generate Splits** below to include them in the training packs and test set."
+                    "Click **⚡ Process Incremental Split** below to include them in the training packs and test set."
                 )
             if upload_errors:
                 st.error("Skipped invalid file(s): " + "; ".join(upload_errors))
@@ -575,215 +691,344 @@ def render_dataset_tab(dataset_mgr: DatasetManager):
     st.divider()
     stats = dataset_mgr.get_dataset_stats()
 
-    st.subheader("📊 Current Raw Dataset Pool (`data/raw/`)")
-    col0, col1, col2 = st.columns(3)
-    with col0:
-        st.markdown("**🐱 Tutorial (Cat vs Not-Cat)**")
-        st.write(f"- `cat/`: **{stats.get('intro', {}).get('cat', 0)}** photos")
-        st.write(f"- `not_cat/`: **{stats.get('intro', {}).get('not_cat', 0)}** photos")
-        if st.button("⚡ Fetch Cat vs. Not-Cat from Hugging Face"):
-            with st.spinner("Fetching samples from Hugging Face Datasets (Bingsu/Cat_and_Dog)..."):
-                seed_res = seed_cat_dataset()
-                st.success(f"Fetched {seed_res['cat_saved']} cats and {seed_res['not_cat_saved']} not-cats from {seed_res['source']}!")
-                st.rerun()
-
-    with col1:
-        st.markdown("**🌿 Stage 1 (Plant vs Not-Plant)**")
-        st.write(f"- `plant/`: **{stats['stage1']['plant']}** photos")
-        st.write(f"- `not_plant/`: **{stats['stage1']['not_plant']}** photos")
-    with col2:
-        st.markdown("**⚠️ Stage 2 (Invasive vs Non-Invasive)**")
-        st.write(f"- `invasive/`: **{stats['stage2']['invasive']}** photos")
-        st.write(f"- `non_invasive/`: **{stats['stage2']['non_invasive']}** photos")
+    st.subheader(f"📊 Current Raw Dataset Pool (`data/datasets/{dataset_config.id}/raw/`)")
+    cols = st.columns(max(1, len(stage_keys)))
+    for idx, skey in enumerate(stage_keys):
+        sc = dataset_config.stages[skey]
+        with cols[idx]:
+            st.markdown(f"**{sc.name}**")
+            st.write(f"- `{sc.pos_label}/`: **{stats.get(skey, {}).get(sc.pos_label, 0)}** photos")
+            st.write(f"- `{sc.neg_label}/`: **{stats.get(skey, {}).get(sc.neg_label, 0)}** photos")
+            if dataset_config.id == "tutorial_cat" and skey == "intro":
+                if st.button("⚡ Fetch Cat vs. Not-Cat from Hugging Face", key="seed_hf_cat_btn"):
+                    with st.spinner("Fetching samples from Hugging Face Datasets (Bingsu/Cat_and_Dog)..."):
+                        intro_raw = os.path.join(dataset_mgr.raw_dir, "intro")
+                        seed_res = seed_cat_dataset(target_dir=intro_raw)
+                        if dataset_mgr.r2_sync is not None and dataset_mgr.r2_sync.is_configured():
+                            for cls_name in sc.classes:
+                                cls_dir = os.path.join(intro_raw, cls_name)
+                                if os.path.isdir(cls_dir):
+                                    for fname in os.listdir(cls_dir):
+                                        fpath = os.path.join(cls_dir, fname)
+                                        if os.path.isfile(fpath):
+                                            dataset_mgr.r2_sync.push_file(
+                                                f"datasets/{dataset_config.id}/raw/intro/{cls_name}/{fname}",
+                                                fpath,
+                                            )
+                        st.success(f"Fetched {seed_res['cat_saved']} cats and {seed_res['not_cat_saved']} not-cats from {seed_res['source']}!")
+                        st.rerun()
 
     st.divider()
     st.subheader("⚙️ Generate 70% Train / 30% Locked Test Splits")
     st.write(
-        "Clicking below will:\n"
-        "1. Check all photos and downsample to $448 \\times 448$ (featherweight storage).\n"
-        "2. Save 30% into locked `data/test_dataset/` for benchmarking.\n"
-        "3. Package 70% into student training `.zip` bundles."
+        "Incremental split preserves all existing train/test assignments so leaderboard scores remain comparable, "
+        "while appending newly uploaded photos (downsampled to $448 \\times 448$) and rebuilding student `.zip` packs."
     )
 
-    test_ratio = st.slider("Test Set Split Ratio", min_value=0.15, max_value=0.40, value=0.30, step=0.05)
+    test_ratio = st.slider(
+        "Test Set Split Ratio",
+        min_value=0.15,
+        max_value=0.40,
+        value=0.30,
+        step=0.05,
+        key=f"test_ratio_{dataset_config.id}",
+    )
 
-    if st.button("⚡ Process & Generate Splits", type="primary"):
-        with st.spinner("Processing, downsampling, and generating packs..."):
-            summary = dataset_mgr.process_and_split_dataset(test_ratio=test_ratio)
+    if st.button("⚡ Process Incremental Split (Append New Photos)", type="primary", key=f"inc_split_{dataset_config.id}"):
+        with st.spinner("Processing new photos and updating packs..."):
+            summary = dataset_mgr.process_and_split_dataset(test_ratio=test_ratio, force_resplit=False)
             dataset_mgr.create_student_training_packs()
-            st.success("✅ Dataset split generated successfully!")
+            st.success(f"✅ Incremental split complete (Split v{dataset_mgr.get_split_version()})!")
             st.json(summary)
+
+    with st.expander("⚠️ Admin Only: Force Full Re-Split (New Split Version)", expanded=False):
+        st.caption(
+            "Re-shuffles all raw images into a brand-new train/test split and increments the dataset's `split_version`. "
+            "Existing leaderboard runs stay tagged with their previous split version."
+        )
+        if render_admin_gate(f"resplit_{dataset_config.id}"):
+            if st.button("🔄 Force Full Re-Split", type="secondary", key=f"force_resplit_{dataset_config.id}"):
+                with st.spinner("Re-splitting entire dataset and bumping split version..."):
+                    summary = dataset_mgr.process_and_split_dataset(test_ratio=test_ratio, force_resplit=True)
+                    dataset_config.split_version = dataset_mgr.get_split_version()
+                    registry.register_dataset(dataset_config)
+                    dataset_mgr.create_student_training_packs()
+                    st.success(f"✅ Full re-split complete! Now on Split v{dataset_config.split_version}.")
+                    st.json(summary)
 
     st.divider()
     st.subheader("📦 Download Student Training Packs")
-    col_d0, col_d1, col_d2 = st.columns(3)
-    with col_d0:
-        render_training_pack_download(
-            dataset_mgr,
-            stage="intro",
-            label="📥 Download Tutorial Pack (.zip)",
-            key="dl_admin_intro",
-            empty_message="Tutorial training pack not generated yet.",
-        )
-    with col_d1:
-        render_training_pack_download(
-            dataset_mgr,
-            stage="stage1",
-            label="📥 Download Stage 1 Training Pack (.zip)",
-            key="dl_admin_stage1",
-            empty_message="Stage 1 training pack not generated yet.",
-        )
-    with col_d2:
-        render_training_pack_download(
-            dataset_mgr,
-            stage="stage2",
-            label="📥 Download Stage 2 Training Pack (.zip)",
-            key="dl_admin_stage2",
-            empty_message="Stage 2 training pack not generated yet.",
-        )
+    pack_cols = st.columns(max(1, len(stage_keys)))
+    for idx, skey in enumerate(stage_keys):
+        sc = dataset_config.stages[skey]
+        with pack_cols[idx]:
+            render_training_pack_download(
+                dataset_mgr,
+                stage=skey,
+                label=f"📥 Download {sc.name} Pack (.zip)",
+                key=f"dl_admin_{dataset_config.id}_{skey}",
+                empty_message=f"{sc.name} training pack not generated yet.",
+            )
 
     st.divider()
     with st.expander("🤖 Coach Reference: Gemini Foundation Model Benchmarks", expanded=False):
         st.write(
             "Run **Gemini 3.5 Flash-Lite**, **Gemini 3.8 Flash**, and/or **Gemini Decision 1 (Decisions API)** "
             "across the locked test set to establish reference bars on the Leaderboard. "
-            "Results are saved to `data/gemini_cache.json` (scores only — no API key is stored). "
-            "For Streamlit Community Cloud, run this locally (with `.streamlit/secrets.toml`) and commit `data/gemini_cache.json` instead of adding `GEMINI_API_KEY` to Cloud Secrets."
+            "Results are cached per dataset/stage and synced to R2 when configured."
         )
-        api_key_input = st.text_input("Gemini API Key (optional if set in .streamlit/secrets.toml or GEMINI_API_KEY)", type="password")
-        b_col1, b_col2 = st.columns(2)
-        with b_col1:
-            bench_stage = st.selectbox(
-                "Stage to benchmark",
-                options=["intro", "stage1", "stage2"],
-                format_func=lambda s: STAGE_LABELS.get(s, s),
+        if render_admin_gate(f"gemini_{dataset_config.id}"):
+            api_key_input = st.text_input(
+                "Gemini API Key (optional if set in .streamlit/secrets.toml or GEMINI_API_KEY)",
+                type="password",
+                key=f"gemini_key_{dataset_config.id}",
             )
-        with b_col2:
-            preset_options = ["all"] + list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys())
-            bench_preset = st.selectbox(
-                "Gemini Benchmark Model / API",
-                options=preset_options,
-                format_func=lambda p: (
-                    "All 3 Benchmarks (Flash-Lite + Flash + Decision 1)"
-                    if p == "all"
-                    else f"{GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['label']} ({GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['model']})"
-                ),
-            )
+            b_col1, b_col2 = st.columns(2)
+            with b_col1:
+                bench_stage = st.selectbox(
+                    "Stage to benchmark",
+                    options=stage_keys,
+                    format_func=lambda s: dataset_config.stages[s].name,
+                    key=f"bench_stage_{dataset_config.id}",
+                )
+            with b_col2:
+                preset_options = ["all"] + list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys())
+                bench_preset = st.selectbox(
+                    "Gemini Benchmark Model / API",
+                    options=preset_options,
+                    format_func=lambda p: (
+                        "All 3 Benchmarks (Flash-Lite + Flash + Decision 1)"
+                        if p == "all"
+                        else f"{GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['label']} ({GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['model']})"
+                    ),
+                    key=f"bench_preset_{dataset_config.id}",
+                )
 
-        preview_runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
-        custom_prompt: Optional[str] = None
-        if bench_preset == "all":
-            st.markdown("**📝 Prompts / Instructions Sent to Gemini:**")
-            st.caption("VLM System Instruction (used by Flash-Lite & Flash):")
-            st.code(preview_runner.get_default_prompt(bench_stage, api_type="generate_content"), language="text")
-            st.caption("Decisions API Instructions & Criteria (used by Decision 1):")
-            st.code(preview_runner.get_default_prompt(bench_stage, api_type="decisions"), language="text")
-        else:
-            api_type = GeminiBenchmarkRunner.BENCHMARK_PRESETS[bench_preset]["api_type"]
-            default_prompt = preview_runner.get_default_prompt(bench_stage, api_type=api_type)
-            prompt_label = (
-                "📝 Decisions API Instructions (editable)"
-                if api_type == "decisions"
-                else "📝 VLM System Instruction Prompt (editable)"
+            preview_runner = GeminiBenchmarkRunner(
+                api_key=api_key_input or None,
+                dataset_config=dataset_config,
+                r2_sync=dataset_mgr.r2_sync,
             )
-            if api_type == "decisions":
-                default_prompt = GeminiBenchmarkRunner.DECISION_CRITERIA[bench_stage]["instructions"]
-                st.caption("Decisions API Criteria:")
-                st.json(GeminiBenchmarkRunner.DECISION_CRITERIA[bench_stage]["criteria"])
-            custom_prompt = st.text_area(
-                prompt_label,
-                value=default_prompt,
-                height=110,
-                key=f"gemini_prompt_{bench_stage}_{bench_preset}",
-            )
+            custom_prompt: Optional[str] = None
+            if bench_preset == "all":
+                st.markdown("**📝 Prompts / Instructions Sent to Gemini:**")
+                st.caption("VLM System Instruction (used by Flash-Lite & Flash):")
+                st.code(preview_runner.get_default_prompt(bench_stage, api_type="generate_content"), language="text")
+                st.caption("Decisions API Instructions & Criteria (used by Decision 1):")
+                st.code(preview_runner.get_default_prompt(bench_stage, api_type="decisions"), language="text")
+            else:
+                api_type = GeminiBenchmarkRunner.BENCHMARK_PRESETS[bench_preset]["api_type"]
+                default_prompt = preview_runner.get_default_prompt(bench_stage, api_type=api_type)
+                prompt_label = (
+                    "📝 Decisions API Instructions (editable)"
+                    if api_type == "decisions"
+                    else "📝 VLM System Instruction Prompt (editable)"
+                )
+                if api_type == "decisions":
+                    spec = preview_runner.get_decision_spec(bench_stage)
+                    default_prompt = spec.get("instructions", "")
+                    st.caption("Decisions API Criteria:")
+                    st.json(spec.get("criteria", {}))
+                custom_prompt = st.text_area(
+                    prompt_label,
+                    value=default_prompt,
+                    height=110,
+                    key=f"gemini_prompt_{dataset_config.id}_{bench_stage}_{bench_preset}",
+                )
 
-        if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary"):
-            targets = list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys()) if bench_preset == "all" else [bench_preset]
-            with st.spinner("Connecting to Gemini API and running benchmark evaluation..."):
+            if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary", key=f"run_gemini_{dataset_config.id}"):
+                targets = list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys()) if bench_preset == "all" else [bench_preset]
+                with st.spinner("Connecting to Gemini API and running benchmark evaluation..."):
+                    try:
+                        runner = GeminiBenchmarkRunner(
+                            api_key=api_key_input or None,
+                            dataset_config=dataset_config,
+                            r2_sync=dataset_mgr.r2_sync,
+                        )
+                        for target_preset in targets:
+                            bench_res = runner.evaluate_stage_benchmark(
+                                stage=bench_stage,
+                                test_images_dir=dataset_mgr.test_dir,
+                                preset=target_preset,
+                                custom_prompt=custom_prompt,
+                            )
+                            st.success(
+                                f"✅ {bench_res['model_name']} Recorded! "
+                                f"F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%"
+                            )
+                            st.json(bench_res["metrics"])
+                    except Exception as e:
+                        st.error(f"Gemini Benchmark Error: {str(e)}")
+
+
+def render_sidebar(r2_sync: R2SyncManager, registry: DatasetRegistry) -> DatasetConfig:
+    st.sidebar.header("📂 Datasets")
+    datasets = registry.list_datasets()
+    ds_map = {d.id: d for d in datasets}
+    ds_ids = [d.id for d in datasets]
+
+    default_id = st.session_state.get("active_dataset_id", ds_ids[0])
+    if default_id not in ds_map:
+        default_id = ds_ids[0]
+
+    selected_id = st.sidebar.selectbox(
+        "Active Dataset",
+        options=ds_ids,
+        index=ds_ids.index(default_id),
+        format_func=lambda did: f"{ds_map[did].icon} {ds_map[did].name}",
+        key="sidebar_dataset_selector",
+    )
+    st.session_state["active_dataset_id"] = selected_id
+    active_dataset = ds_map[selected_id]
+
+    with st.sidebar.expander("➕ Create New Dataset", expanded=False):
+        with st.form("create_dataset_form"):
+            new_name = st.text_input("Dataset Name", placeholder="e.g., Waste Sorter")
+            new_slug_raw = st.text_input("Dataset Slug (optional)", placeholder="auto-generated if blank")
+            new_icon = st.text_input("Icon Emoji", value="📦")
+            new_desc = st.text_input("Description", placeholder="Short description of the challenge")
+            num_stages = st.radio("Number of Stages", options=[1, 2], horizontal=True)
+
+            st.markdown("**Stage 1**")
+            s1_name = st.text_input("Stage 1 Name", value="Stage 1: Primary Classifier")
+            s1_pos = st.text_input("Stage 1 Positive Label", value="target")
+            s1_neg = st.text_input("Stage 1 Negative Label", value="other")
+
+            s2_name = st.text_input("Stage 2 Name (if 2 stages)", value="Stage 2: Fine Classifier")
+            s2_pos = st.text_input("Stage 2 Positive Label", value="positive")
+            s2_neg = st.text_input("Stage 2 Negative Label", value="negative")
+            enable_pipeline = st.checkbox("Enable Cascaded Pipeline Board (2-stage only)", value=False)
+
+            submitted = st.form_submit_button("Create Dataset")
+            if submitted:
                 try:
-                    runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
-                    for target_preset in targets:
-                        bench_res = runner.evaluate_stage_benchmark(
-                            stage=bench_stage,
-                            preset=target_preset,
-                            custom_prompt=custom_prompt,
+                    slug = (new_slug_raw.strip() or DatasetRegistry.slugify(new_name))
+                    DatasetRegistry.validate_slug(slug)
+                    if slug in ds_map:
+                        st.error(f"Dataset '{slug}' already exists.")
+                    elif not new_name.strip():
+                        st.error("Dataset Name is required.")
+                    else:
+                        stages = {
+                            "stage1": StageConfig(
+                                stage_id="stage1",
+                                name=s1_name.strip() or "Stage 1",
+                                pos_label=DatasetRegistry.slugify(s1_pos),
+                                neg_label=DatasetRegistry.slugify(s1_neg),
+                            )
+                        }
+                        if num_stages == 2:
+                            stages["stage2"] = StageConfig(
+                                stage_id="stage2",
+                                name=s2_name.strip() or "Stage 2",
+                                pos_label=DatasetRegistry.slugify(s2_pos),
+                                neg_label=DatasetRegistry.slugify(s2_neg),
+                            )
+                        created = DatasetConfig(
+                            id=slug,
+                            name=new_name.strip(),
+                            icon=new_icon.strip() or "📦",
+                            description=new_desc.strip(),
+                            stages=stages,
+                            has_pipeline=(num_stages == 2 and enable_pipeline),
+                            split_version=1,
                         )
-                        st.success(
-                            f"✅ {bench_res['model_name']} Recorded! "
-                            f"F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%"
-                        )
-                        st.json(bench_res["metrics"])
-                except Exception as e:
-                    st.error(f"Gemini Benchmark Error: {str(e)}")
+                        registry.register_dataset(created)
+                        st.session_state["active_dataset_id"] = created.id
+                        st.success(f"Created dataset '{created.name}'!")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not create dataset: {exc}")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("☁️ Storage & Sync")
+    if r2_sync.is_configured():
+        st.sidebar.success(f"R2 Connected (`{r2_sync.bucket}`)")
+        if r2_sync.last_sync_at:
+            st.sidebar.caption(f"Last sync: {r2_sync.last_sync_at[:19].replace('T', ' ')} ({r2_sync.last_sync_status})")
+        if r2_sync.last_sync_error:
+            st.sidebar.warning(f"Sync warning: {r2_sync.last_sync_error}")
+        if st.sidebar.button("🔄 Sync Now", key="sidebar_sync_now"):
+            r2_sync.pull_metadata()
+            ensure_dataset_synced(r2_sync, active_dataset.id, force=True)
+            st.rerun()
+    else:
+        st.sidebar.info("Local Storage Mode (R2 not configured)")
+
+    return active_dataset
+
 
 def main():
-    st.title("🌿 MIPS: Invasive Plant Species ML Platform")
-    st.caption("First Lego League (FLL) Team 🤖 | Machine Learning Experiment Tracker & Leaderboards")
+    r2_sync = get_r2_sync()
+    registry = DatasetRegistry(datasets_dir="data/datasets", r2_sync=r2_sync)
+    active_dataset = render_sidebar(r2_sync, registry)
+    ensure_dataset_synced(r2_sync, active_dataset.id)
 
-    storage = StorageManager()
-    dataset_mgr = DatasetManager()
-    evaluator = ModelEvaluator()
+    st.title(f"{active_dataset.icon} MIPS: {active_dataset.name}")
+    subtitle = active_dataset.description or "First Lego League (FLL) Team 🤖 | Machine Learning Experiment Tracker & Leaderboards"
+    st.caption(f"{subtitle} | Split v{active_dataset.split_version}")
 
-    tab_intro, tab_b1, tab_b2, tab_b3, tab_sub, tab_admin = st.tabs([
-        "🐱 Tutorial: Cat vs Not-Cat",
-        "🌿 Board 1: Plant vs Not-Plant",
-        "⚠️ Board 2: Invasive vs Non-Invasive",
-        "🏆 Board 3: Field Robot Pipeline",
-        "📤 Submit Model",
-        "🗂️ Dataset Manager",
-    ])
+    storage = StorageManager(dataset_id=active_dataset.id, r2_sync=r2_sync)
+    dataset_mgr = DatasetManager(dataset_config=active_dataset, r2_sync=r2_sync)
+    evaluator = ModelEvaluator(test_dataset_dir=dataset_mgr.test_dir, dataset_config=active_dataset)
 
-    with tab_intro:
-        st.markdown(
-            """
-            > **Welcome to the MIPS Machine Learning Tutorial!** 🎓  
-            > Practice the entire machine learning workflow using the **Cat vs. Not-Cat** dataset before moving to invasive plants.  
-            > 
-            > ⚠️ **Important Step for Google Teachable Machine:**  
-            > Teachable Machine accepts **image files**, not `.zip` files!  
-            > 1. **Download & UNZIP** `intro_train.zip` on your computer (double-click it to extract the `cat` and `not_cat` folders).  
-            > 2. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/).  
-            > 3. Name your classes `cat` and `not_cat`, then drag/upload the images from each folder into its matching class.  
-            > 4. Click **Train Model**, then **Export Model**:  
-            >    - Choose **TensorFlow Lite** tab $\\rightarrow$ select **Floating point** $\\rightarrow$ **Download my model**.  
-            >    - *(Avoid Keras, TensorFlow.js, SavedModel, or EdgeTPU).*  
-            > 5. Upload that downloaded `.zip` file in the **📤 Submit Model** tab to evaluate!
-            """
-        )
-        render_training_pack_download(
-            dataset_mgr,
-            stage="intro",
-            label="📥 Download Tutorial Training Pack (intro_train.zip)",
-            key="dl_intro_tab",
-        )
-        render_board(storage, stage="intro", stage_name="🐱 Tutorial: Cat vs Not-Cat", pos_label="cat", neg_label="not_cat")
+    stage_items = list(active_dataset.stages.items())
+    tab_labels = [sc.name for _, sc in stage_items]
+    if active_dataset.has_pipeline:
+        tab_labels.append("🏆 Field Robot Pipeline")
+    tab_labels.extend(["📤 Submit Model", "🗂️ Dataset Manager"])
 
-    with tab_b1:
-        render_training_pack_download(
-            dataset_mgr,
-            stage="stage1",
-            label="📥 Download Stage 1 Training Pack (stage1_train.zip)",
-            key="dl_stage1_tab",
-        )
-        render_board(storage, stage="stage1", stage_name="🌿 Stage 1 (Plant vs Not-Plant)", pos_label="plant", neg_label="not_plant")
+    tabs = st.tabs(tab_labels)
+    tab_idx = 0
 
-    with tab_b2:
-        render_training_pack_download(
-            dataset_mgr,
-            stage="stage2",
-            label="📥 Download Stage 2 Training Pack (stage2_train.zip)",
-            key="dl_stage2_tab",
-        )
-        render_board(storage, stage="stage2", stage_name="⚠️ Stage 2 (Invasive vs Non-Invasive)", pos_label="invasive", neg_label="non_invasive")
+    for skey, sc in stage_items:
+        with tabs[tab_idx]:
+            if active_dataset.id == "tutorial_cat" and skey == "intro":
+                st.markdown(
+                    """
+                    > **Welcome to the MIPS Machine Learning Tutorial!** 🎓  
+                    > Practice the entire machine learning workflow using the **Cat vs. Not-Cat** dataset before moving to invasive plants.  
+                    > 
+                    > ⚠️ **Important Step for Google Teachable Machine:**  
+                    > Teachable Machine accepts **image files**, not `.zip` files!  
+                    > 1. **Download & UNZIP** `intro_train.zip` on your computer (double-click it to extract the `cat` and `not_cat` folders).  
+                    > 2. Open [Google Teachable Machine (Image Project)](https://teachablemachine.withgoogle.com/).  
+                    > 3. Name your classes `cat` and `not_cat`, then drag/upload the images from each folder into its matching class.  
+                    > 4. Click **Train Model**, then **Export Model**:  
+                    >    - Choose **TensorFlow Lite** tab $\\rightarrow$ select **Floating point** $\\rightarrow$ **Download my model**.  
+                    >    - *(Avoid Keras, TensorFlow.js, SavedModel, or EdgeTPU).*  
+                    > 5. Upload that downloaded `.zip` file in the **📤 Submit Model** tab to evaluate!
+                    """
+                )
+            render_training_pack_download(
+                dataset_mgr,
+                stage=skey,
+                label=f"📥 Download {sc.name} Training Pack ({skey}_train.zip)",
+                key=f"dl_{active_dataset.id}_{skey}_tab",
+            )
+            render_board(
+                storage,
+                dataset_config=active_dataset,
+                stage=skey,
+                stage_name=sc.name,
+                pos_label=sc.pos_label,
+                neg_label=sc.neg_label,
+                r2_sync=r2_sync,
+            )
+        tab_idx += 1
 
-    with tab_b3:
-        render_pipeline_board(storage, evaluator)
+    if active_dataset.has_pipeline:
+        with tabs[tab_idx]:
+            render_pipeline_board(storage, evaluator, dataset_config=active_dataset, r2_sync=r2_sync)
+        tab_idx += 1
 
-    with tab_sub:
-        render_submit_tab(storage, evaluator)
+    with tabs[tab_idx]:
+        render_submit_tab(storage, evaluator, dataset_config=active_dataset, dataset_mgr=dataset_mgr, r2_sync=r2_sync)
+    tab_idx += 1
 
-    with tab_admin:
-        render_dataset_tab(dataset_mgr)
+    with tabs[tab_idx]:
+        render_dataset_tab(dataset_mgr, dataset_config=active_dataset, registry=registry)
+
 
 if __name__ == "__main__":
     main()

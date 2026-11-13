@@ -1,9 +1,21 @@
+import hmac
 import os
 import json
 import shutil
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+from core.dataset_config import DatasetRegistry
+from core.r2_sync import R2SyncManager
+
+
+def verify_admin_password(candidate: Optional[str], expected: Optional[str]) -> bool:
+    """Constant-time check for coach admin password; fails closed if expected is unset/empty."""
+    if not expected or not candidate:
+        return False
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
 
 class StorageManager:
     """Manages persistent JSON storage for model evaluation runs, leaderboards, and model artifacts."""
@@ -12,9 +24,11 @@ class StorageManager:
         self,
         db_path: str = "data/leaderboard_history.json",
         models_dir: str = "data/models",
+        r2_sync: Optional[R2SyncManager] = None,
     ) -> None:
         self.db_path = db_path
         self.models_dir = models_dir
+        self.r2_sync = r2_sync
         self._ensure_db()
 
     def _ensure_db(self) -> None:
@@ -43,15 +57,32 @@ class StorageManager:
             record["id"] = f"run-{uuid.uuid4().hex[:8]}"
         if "timestamp" not in record or not record["timestamp"]:
             record["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        if not record.get("dataset_id"):
+            record["dataset_id"] = DatasetRegistry.infer_dataset_id(record.get("stage", ""))
+        if "split_version" not in record or record["split_version"] is None:
+            record["split_version"] = 1
 
         runs = self._load_all()
         runs.append(record)
         self._save_all(runs)
+        if self.r2_sync and self.r2_sync.is_configured():
+            self.r2_sync.push_run(record)
         return record
 
-    def get_leaderboard(self, stage: str) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _run_dataset_id(run: Dict[str, Any]) -> str:
+        return run.get("dataset_id") or DatasetRegistry.infer_dataset_id(run.get("stage", ""))
+
+    def get_leaderboard(
+        self, stage: str, dataset_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         runs = self._load_all()
-        stage_runs = [r for r in runs if r.get("stage") == stage]
+        stage_runs = [
+            r
+            for r in runs
+            if r.get("stage") == stage
+            and (dataset_id is None or self._run_dataset_id(r) == dataset_id)
+        ]
 
         # Sort descending by F1, then by Accuracy
         def sort_key(item: Dict[str, Any]) -> tuple:
@@ -64,10 +95,15 @@ class StorageManager:
         return stage_runs
 
     def get_history(
-        self, team_name: Optional[str] = None, stage: Optional[str] = None
+        self,
+        team_name: Optional[str] = None,
+        stage: Optional[str] = None,
+        dataset_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         runs = self._load_all()
         filtered = runs
+        if dataset_id is not None:
+            filtered = [r for r in filtered if self._run_dataset_id(r) == dataset_id]
         if team_name:
             filtered = [r for r in filtered if r.get("team_name") == team_name]
         if stage:
@@ -112,6 +148,9 @@ class StorageManager:
                     f.write(f"{idx} {lbl}\n")
             artifacts["labels_path"] = labels_path
 
+        if self.r2_sync and self.r2_sync.is_configured():
+            self.r2_sync.push_model_artifact(run_id, target_dir, subdir=subdir)
+
         return artifacts
 
     def get_model_artifact_bytes(
@@ -121,6 +160,8 @@ class StorageManager:
         if not run_id:
             return None
         zip_path = os.path.join(self._artifact_dir(run_id, subdir=subdir), "submission.zip")
+        if not os.path.exists(zip_path) and self.r2_sync and self.r2_sync.is_configured():
+            self.r2_sync.ensure_model_artifact_local(run_id, self.models_dir, subdir=subdir)
         if not os.path.exists(zip_path):
             return None
         with open(zip_path, "rb") as f:

@@ -69,6 +69,12 @@ Deploy for free in under 60 seconds with your GitHub account:
 Your live web platform will be accessible to your students, coaches, and FLL judges at:  
 `https://terratron-mips.streamlit.app`
 
+### Secrets & Shared Storage (Cloudflare R2 + Gemini)
+Copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to `.streamlit/secrets.toml` locally (gitignored) or paste into **Streamlit Cloud → App Settings → Secrets**:
+- **Cloudflare R2 API Tokens & Endpoint:** [Cloudflare R2 API Tokens Docs](https://developers.cloudflare.com/r2/api/tokens/)
+- **Gemini API Key:** [Google AI Studio](https://aistudio.google.com/)
+- **Streamlit Secrets Management:** [Streamlit Secrets Docs](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)
+
 ---
 
 ## 🧪 Running Tests

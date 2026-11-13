@@ -7,6 +7,8 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 
+from core.dataset_config import DatasetConfig
+
 
 class GeminiBenchmarkRunner:
     """Evaluates benchmark reference scores using Gemini Flash-Lite, Flash, and Decisions API."""
@@ -82,8 +84,14 @@ class GeminiBenchmarkRunner:
         cache_file: str = "data/gemini_cache.json",
         api_key: Optional[str] = None,
         model_name: str = "gemini-3.5-flash-lite",
+        dataset_config: Optional[DatasetConfig] = None,
+        r2_sync: Optional[Any] = None,
+        cache_dir: str = "data/gemini_cache",
     ) -> None:
         self.cache_file = cache_file
+        self.cache_dir = cache_dir
+        self.dataset_config = dataset_config
+        self.r2_sync = r2_sync
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
             try:
@@ -99,18 +107,79 @@ class GeminiBenchmarkRunner:
         "stage2": ("invasive", "non_invasive"),
     }
 
+    def _get_stage_classes(self, stage: str) -> Tuple[str, str]:
+        if self.dataset_config is not None:
+            if stage not in self.dataset_config.stages:
+                raise ValueError(f"Unknown stage: {stage}")
+            sc = self.dataset_config.stages[stage]
+            return sc.pos_label, sc.neg_label
+        if stage not in self.STAGE_CLASSES:
+            raise ValueError(f"Unknown stage: {stage}")
+        return self.STAGE_CLASSES[stage]
+
     def get_system_instruction(self, stage: str) -> str:
-        return self.SYSTEM_INSTRUCTIONS.get(stage, "")
+        use_builtin = (
+            self.dataset_config is None
+            or self.dataset_config.id in ("invasive_plants", "tutorial_cat")
+        )
+        if use_builtin and stage in self.SYSTEM_INSTRUCTIONS:
+            return self.SYSTEM_INSTRUCTIONS[stage]
+        if self.dataset_config is not None and stage in self.dataset_config.stages:
+            sc = self.dataset_config.stages[stage]
+            return (
+                f"You are an expert image classifier for '{self.dataset_config.name}' ({sc.name}). "
+                f"Determine if the image belongs to '{sc.pos_label}' or '{sc.neg_label}'. "
+                f'Respond ONLY with valid JSON: {{"label": "{sc.pos_label}" | "{sc.neg_label}", "confidence": <float 0.0-1.0>}}.'
+            )
+        return ""
+
+    def get_decision_spec(self, stage: str) -> Dict[str, Any]:
+        use_builtin = (
+            self.dataset_config is None
+            or self.dataset_config.id in ("invasive_plants", "tutorial_cat")
+        )
+        if use_builtin and stage in self.DECISION_CRITERIA:
+            return self.DECISION_CRITERIA[stage]
+        if self.dataset_config is not None and stage in self.dataset_config.stages:
+            sc = self.dataset_config.stages[stage]
+            return {
+                "instructions": f"Classify whether this image is {sc.pos_label} or {sc.neg_label}.",
+                "criteria": {
+                    sc.pos_label: f"The image clearly shows {sc.pos_label}.",
+                    sc.neg_label: f"The image shows {sc.neg_label} (not {sc.pos_label}).",
+                },
+            }
+        return {}
 
     def get_default_prompt(self, stage: str, api_type: str = "generate_content") -> str:
         """Return the formatted default prompt/instructions for a stage and API type."""
         if api_type == "decisions":
-            spec = self.DECISION_CRITERIA.get(stage, {})
+            spec = self.get_decision_spec(stage)
             criteria_lines = "\n".join(
                 f"- {k}: {v}" for k, v in spec.get("criteria", {}).items()
             )
             return f"{spec.get('instructions', '')}\n\nCriteria:\n{criteria_lines}".strip()
         return self.get_system_instruction(stage)
+
+    def _stage_cache_path(self, stage: str) -> str:
+        if self.dataset_config is not None:
+            return os.path.join(self.cache_dir, self.dataset_config.id, f"{stage}.json")
+        return self.cache_file
+
+    def save_stage_cache(self, stage: str, stage_data: Dict[str, Any]) -> None:
+        if self.dataset_config is not None:
+            path = self._stage_cache_path(stage)
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(stage_data, f, indent=2)
+            if self.r2_sync is not None and self.r2_sync.is_configured():
+                self.r2_sync.push_file(f"gemini_cache/{self.dataset_config.id}/{stage}.json", path)
+            return
+        cache = self.load_cache()
+        cache[stage] = stage_data
+        self.save_cache(cache)
 
     def load_cache(self) -> Dict[str, Any]:
         if os.path.exists(self.cache_file):
@@ -130,8 +199,20 @@ class GeminiBenchmarkRunner:
 
     def get_stage_benchmarks(self, stage: str) -> List[Dict[str, Any]]:
         """Return cached benchmark entries for a stage (supports both legacy single-entry and multi-preset caches)."""
-        cache = self.load_cache()
-        stage_data = cache.get(stage)
+        stage_data = None
+        if self.dataset_config is not None:
+            path = self._stage_cache_path(stage)
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        stage_data = json.load(f)
+                except Exception:
+                    stage_data = None
+            elif self.dataset_config.id in ("invasive_plants", "tutorial_cat"):
+                stage_data = self.load_cache().get(stage)
+        else:
+            stage_data = self.load_cache().get(stage)
+
         if not stage_data:
             return []
         if "metrics" in stage_data:
@@ -173,7 +254,7 @@ class GeminiBenchmarkRunner:
         pil_img.convert("RGB").save(buf, format="JPEG", quality=90)
         img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-        spec = self.DECISION_CRITERIA[stage]
+        spec = self.get_decision_spec(stage)
         questions = {
             "classification": {
                 "type": "choice",
@@ -240,8 +321,7 @@ class GeminiBenchmarkRunner:
             raise ValueError(
                 "GEMINI_API_KEY is not set. Please set GEMINI_API_KEY in .streamlit/secrets.toml or your environment."
             )
-        if stage not in self.STAGE_CLASSES:
-            raise ValueError(f"Unknown stage: {stage}")
+        pos_class, neg_class = self._get_stage_classes(stage)
         if preset not in self.BENCHMARK_PRESETS:
             raise ValueError(f"Unknown Gemini benchmark preset: {preset}")
 
@@ -260,7 +340,6 @@ class GeminiBenchmarkRunner:
         default_prompt = self.get_default_prompt(stage, api_type=api_type)
         prompt_used = (custom_prompt or "").strip() or default_prompt
         sys_instruction = (custom_prompt or "").strip() or self.get_system_instruction(stage)
-        pos_class, neg_class = self.STAGE_CLASSES[stage]
 
         stage_dir = os.path.join(test_images_dir, stage)
         if not os.path.exists(stage_dir):
@@ -344,13 +423,22 @@ class GeminiBenchmarkRunner:
             "errors": errors,
         }
 
-        # Save to cache under cache[stage][preset]
-        cache = self.load_cache()
-        existing_stage = cache.get(stage)
+        # Save to cache under stage[preset]
+        existing_stage: Any = None
+        if self.dataset_config is not None:
+            path = self._stage_cache_path(stage)
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        existing_stage = json.load(f)
+                except Exception:
+                    existing_stage = None
+        else:
+            existing_stage = self.load_cache().get(stage)
+
         if not isinstance(existing_stage, dict) or "metrics" in existing_stage:
             existing_stage = {}
         existing_stage[preset] = benchmark_result
-        cache[stage] = existing_stage
-        self.save_cache(cache)
+        self.save_stage_cache(stage, existing_stage)
 
         return benchmark_result
