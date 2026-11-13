@@ -2,6 +2,7 @@ import os
 import textwrap
 import uuid
 from datetime import datetime
+from typing import Optional
 import pandas as pd
 from PIL import Image
 import plotly.express as px
@@ -497,7 +498,7 @@ def render_training_pack_download(
     stage: str,
     label: str,
     key: str,
-    empty_message: str | None = None,
+    empty_message: Optional[str] = None,
 ):
     pack_path = os.path.join(dataset_mgr.packs_dir, f"{stage}_train.zip")
     if os.path.exists(pack_path):
