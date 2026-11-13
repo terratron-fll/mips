@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from core.evaluator import ModelEvaluator
 
 class PipelineEvaluator:
@@ -72,10 +72,16 @@ class PipelineEvaluator:
         self,
         stage1_zip_or_path: Union[bytes, str],
         stage2_zip_or_path: Union[bytes, str],
+        stage1_save_dir: Optional[str] = None,
+        stage2_save_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Runs the complete cascaded evaluation of both models on the test sets."""
-        res1 = self.evaluator.evaluate_submission(stage1_zip_or_path, stage="stage1")
-        res2 = self.evaluator.evaluate_submission(stage2_zip_or_path, stage="stage2")
+        res1 = self.evaluator.evaluate_submission(
+            stage1_zip_or_path, stage="stage1", save_dir=stage1_save_dir
+        )
+        res2 = self.evaluator.evaluate_submission(
+            stage2_zip_or_path, stage="stage2", save_dir=stage2_save_dir
+        )
 
         m1 = res1["metrics"]
         m2 = res2["metrics"]

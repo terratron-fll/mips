@@ -46,3 +46,36 @@ def test_get_history_filtering(tmp_path):
 
     history_stage1 = storage.get_history(stage="stage1")
     assert len(history_stage1) == 2
+
+
+def test_save_and_retrieve_model_artifact(tmp_path):
+    db_file = str(tmp_path / "leaderboard.json")
+    models_dir = str(tmp_path / "models")
+    storage = StorageManager(db_path=db_file, models_dir=models_dir)
+
+    extracted = tmp_path / "model_unquant.tflite"
+    extracted.write_bytes(b"tflite-binary")
+
+    artifacts = storage.save_model_artifact(
+        run_id="run-abc",
+        zip_bytes=b"fake-zip-bytes",
+        extracted_model_path=str(extracted),
+        labels=["plant", "not_plant"],
+    )
+    assert os.path.exists(artifacts["zip_path"])
+    assert os.path.exists(artifacts["model_path"])
+    assert os.path.exists(artifacts["labels_path"])
+
+    retrieved = storage.get_model_artifact_bytes("run-abc")
+    assert retrieved is not None
+    filename, content = retrieved
+    assert filename.endswith(".zip")
+    assert content == b"fake-zip-bytes"
+
+
+def test_get_model_artifact_bytes_missing_returns_none(tmp_path):
+    storage = StorageManager(
+        db_path=str(tmp_path / "leaderboard.json"),
+        models_dir=str(tmp_path / "models"),
+    )
+    assert storage.get_model_artifact_bytes("non-existent-run") is None

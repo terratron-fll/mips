@@ -1,5 +1,6 @@
 import os
 import textwrap
+import uuid
 from datetime import datetime
 import pandas as pd
 from PIL import Image
@@ -250,10 +251,43 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
         target_item = inspectable_runs[selected_idx]
         target_run = target_item["run"]
+        run_id = target_run.get("id")
 
         notes = target_run.get("notes")
         if notes:
             st.info(f"📝 **Team Hypothesis & Experiment Notes:** {notes}")
+
+        if stage == "pipeline":
+            s1_art = storage.get_model_artifact_bytes(run_id, subdir="stage1")
+            s2_art = storage.get_model_artifact_bytes(run_id, subdir="stage2")
+            if s1_art or s2_art:
+                dl_c1, dl_c2 = st.columns(2)
+                if s1_art:
+                    dl_c1.download_button(
+                        "⬇️ Download Stage 1 Model (.zip)",
+                        data=s1_art[1],
+                        file_name=s1_art[0],
+                        mime="application/zip",
+                        key=f"dl_{stage}_{run_id}_s1_{selected_idx}",
+                    )
+                if s2_art:
+                    dl_c2.download_button(
+                        "⬇️ Download Stage 2 Model (.zip)",
+                        data=s2_art[1],
+                        file_name=s2_art[0],
+                        mime="application/zip",
+                        key=f"dl_{stage}_{run_id}_s2_{selected_idx}",
+                    )
+        else:
+            artifact = storage.get_model_artifact_bytes(run_id)
+            if artifact:
+                st.download_button(
+                    "⬇️ Download Saved Model (.zip)",
+                    data=artifact[1],
+                    file_name=artifact[0],
+                    mime="application/zip",
+                    key=f"dl_{stage}_{run_id}_{selected_idx}",
+                )
 
         col_cm, col_err = st.columns([1, 1])
         with col_cm:
@@ -334,18 +368,22 @@ def render_submit_tab(storage: StorageManager, evaluator: ModelEvaluator):
         with st.spinner("Unpacking model, loading locked test suite, and calculating ML metrics..."):
             try:
                 zip_bytes = uploaded_zip.read()
-                results = evaluator.evaluate_submission(zip_bytes, stage=stage)
+                run_id = f"run-{uuid.uuid4().hex[:8]}"
+                save_dir = os.path.join(storage.models_dir, run_id)
+                results = evaluator.evaluate_submission(zip_bytes, stage=stage, save_dir=save_dir)
 
                 metrics = results["metrics"]
                 errors = results["errors"]
 
                 run_record = {
+                    "id": run_id,
                     "stage": stage,
                     "team_name": team_name,
                     "model_version": model_version or "v1.0",
                     "notes": notes,
                     "metrics": metrics,
                     "errors": errors,
+                    "artifacts": results.get("saved_artifacts", {}),
                 }
                 storage.save_run(run_record)
 
@@ -403,16 +441,29 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
         with st.spinner("Simulating robot traversal across field samples..."):
             try:
                 pe = PipelineEvaluator(evaluator)
-                pipeline_run = pe.evaluate_pipeline(stage1_file.read(), stage2_file.read())
+                run_id = f"run-{uuid.uuid4().hex[:8]}"
+                s1_save_dir = os.path.join(storage.models_dir, run_id, "stage1")
+                s2_save_dir = os.path.join(storage.models_dir, run_id, "stage2")
+                pipeline_run = pe.evaluate_pipeline(
+                    stage1_file.read(),
+                    stage2_file.read(),
+                    stage1_save_dir=s1_save_dir,
+                    stage2_save_dir=s2_save_dir,
+                )
                 pipeline_metrics = pipeline_run["metrics"]
 
                 storage.save_run({
+                    "id": run_id,
                     "stage": "pipeline",
                     "team_name": team_name or "Terratron Robot",
                     "model_version": version_label or "Pipeline v1",
                     "notes": "Cascaded Field Robot Test",
                     "metrics": pipeline_metrics,
                     "errors": pipeline_run["errors"],
+                    "artifacts": {
+                        "stage1": pipeline_run["stage1_result"].get("saved_artifacts", {}),
+                        "stage2": pipeline_run["stage2_result"].get("saved_artifacts", {}),
+                    },
                 })
 
                 st.success(

@@ -132,3 +132,39 @@ def test_fix_h5_depthwise_conv_strips_groups(tmp_path):
         assert "groups" not in layers[0]["config"]
         assert layers[0]["config"]["depth_multiplier"] == 1
         assert layers[1]["config"]["groups"] == 1
+
+
+def test_evaluate_submission_saves_artifacts_when_save_dir_provided(tmp_path, monkeypatch):
+    test_dir = tmp_path / "test_dataset"
+    (test_dir / "stage1" / "plant").mkdir(parents=True)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(test_dir / "stage1" / "plant" / "p1.jpg")
+
+    evaluator = ModelEvaluator(test_dataset_dir=str(test_dir))
+    monkeypatch.setattr(evaluator, "_load_predictor", lambda _: (lambda arr: np.array([[0.9, 0.1]])))
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as z:
+        z.writestr("model_unquant.tflite", b"dummy-tflite")
+        z.writestr("labels.txt", "0 plant\n1 not_plant\n")
+
+    save_dir = str(tmp_path / "saved_models" / "run-test")
+    result = evaluator.evaluate_submission(zip_buf.getvalue(), stage="stage1", save_dir=save_dir)
+
+    assert "saved_artifacts" in result
+    assert os.path.exists(os.path.join(save_dir, "submission.zip"))
+    assert os.path.exists(os.path.join(save_dir, "model_unquant.tflite"))
+    assert os.path.exists(os.path.join(save_dir, "labels.txt"))
+
+
+def test_evaluate_submission_does_not_leave_orphaned_dir_on_invalid_zip(tmp_path):
+    evaluator = ModelEvaluator(test_dataset_dir=str(tmp_path / "test_dataset"))
+    save_dir = str(tmp_path / "saved_models" / "run-bad")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as z:
+        z.writestr("random.txt", b"not-a-model")
+
+    with pytest.raises(ValueError):
+        evaluator.evaluate_submission(zip_buf.getvalue(), stage="stage1", save_dir=save_dir)
+
+    assert not os.path.exists(save_dir)

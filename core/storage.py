@@ -1,14 +1,20 @@
 import os
 import json
+import shutil
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 class StorageManager:
-    """Manages persistent JSON storage for model evaluation runs and leaderboards."""
+    """Manages persistent JSON storage for model evaluation runs, leaderboards, and model artifacts."""
 
-    def __init__(self, db_path: str = "data/leaderboard_history.json") -> None:
+    def __init__(
+        self,
+        db_path: str = "data/leaderboard_history.json",
+        models_dir: str = "data/models",
+    ) -> None:
         self.db_path = db_path
+        self.models_dir = models_dir
         self._ensure_db()
 
     def _ensure_db(self) -> None:
@@ -67,3 +73,56 @@ class StorageManager:
         if stage:
             filtered = [r for r in filtered if r.get("stage") == stage]
         return filtered
+
+    def _artifact_dir(self, run_id: str, subdir: Optional[str] = None) -> str:
+        if subdir:
+            return os.path.join(self.models_dir, run_id, subdir)
+        return os.path.join(self.models_dir, run_id)
+
+    def save_model_artifact(
+        self,
+        run_id: str,
+        zip_bytes: bytes,
+        extracted_model_path: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        subdir: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Persist uploaded model zip and extracted model/labels under data/models/<run_id>/."""
+        target_dir = self._artifact_dir(run_id, subdir=subdir)
+        os.makedirs(target_dir, exist_ok=True)
+
+        zip_path = os.path.join(target_dir, "submission.zip")
+        with open(zip_path, "wb") as f:
+            f.write(zip_bytes)
+
+        artifacts: Dict[str, str] = {
+            "model_dir": target_dir,
+            "zip_path": zip_path,
+        }
+
+        if extracted_model_path and os.path.exists(extracted_model_path):
+            dest_model = os.path.join(target_dir, os.path.basename(extracted_model_path))
+            shutil.copy2(extracted_model_path, dest_model)
+            artifacts["model_path"] = dest_model
+
+        if labels is not None:
+            labels_path = os.path.join(target_dir, "labels.txt")
+            with open(labels_path, "w", encoding="utf-8") as f:
+                for idx, lbl in enumerate(labels):
+                    f.write(f"{idx} {lbl}\n")
+            artifacts["labels_path"] = labels_path
+
+        return artifacts
+
+    def get_model_artifact_bytes(
+        self, run_id: str, subdir: Optional[str] = None
+    ) -> Optional[Tuple[str, bytes]]:
+        """Return (download_filename, bytes) for a run's archived submission.zip, or None."""
+        if not run_id:
+            return None
+        zip_path = os.path.join(self._artifact_dir(run_id, subdir=subdir), "submission.zip")
+        if not os.path.exists(zip_path):
+            return None
+        with open(zip_path, "rb") as f:
+            suffix = f"_{subdir}" if subdir else ""
+            return (f"{run_id}{suffix}_model.zip", f.read())

@@ -2,6 +2,8 @@ import gc
 import io
 import os
 import re
+import shutil
+import sys
 import tempfile
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -266,7 +268,10 @@ class ModelEvaluator:
                 )
 
     def evaluate_submission(
-        self, zip_bytes_or_path: Union[bytes, str], stage: str
+        self,
+        zip_bytes_or_path: Union[bytes, str],
+        stage: str = "stage1",
+        save_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         if stage not in self.STAGE_TARGETS:
             raise ValueError(f"Unknown stage: {stage}. Expected one of {list(self.STAGE_TARGETS.keys())}")
@@ -326,17 +331,57 @@ class ModelEvaluator:
                 metrics = self.compute_binary_metrics(y_true, y_pred, class_names=[neg_class, pos_class])
                 errors.sort(key=lambda x: x["confidence"], reverse=True)
 
-                return {
+                result: Dict[str, Any] = {
                     "stage": stage,
                     "labels": labels,
                     "metrics": metrics,
                     "errors": errors[:10],
                 }
+
+                if save_dir:
+                    result["saved_artifacts"] = self._persist_submission_artifacts(
+                        save_dir=save_dir,
+                        zip_bytes_or_path=zip_bytes_or_path,
+                        model_path=model_path,
+                        labels=labels,
+                    )
+
+                return result
         finally:
-            # Prevent TensorFlow memory leak on repeated submissions
-            try:
-                import tensorflow as tf
-                tf.keras.backend.clear_session()
-            except Exception:
-                pass
+            # Prevent TensorFlow memory leak on repeated submissions (only if TF was actually loaded)
+            if "tensorflow" in sys.modules:
+                try:
+                    sys.modules["tensorflow"].keras.backend.clear_session()
+                except Exception:
+                    pass
             gc.collect()
+
+    @staticmethod
+    def _persist_submission_artifacts(
+        save_dir: str,
+        zip_bytes_or_path: Union[bytes, str],
+        model_path: str,
+        labels: List[str],
+    ) -> Dict[str, str]:
+        os.makedirs(save_dir, exist_ok=True)
+        zip_dest = os.path.join(save_dir, "submission.zip")
+        if isinstance(zip_bytes_or_path, bytes):
+            with open(zip_dest, "wb") as f:
+                f.write(zip_bytes_or_path)
+        else:
+            shutil.copy2(zip_bytes_or_path, zip_dest)
+
+        model_dest = os.path.join(save_dir, os.path.basename(model_path))
+        shutil.copy2(model_path, model_dest)
+
+        labels_dest = os.path.join(save_dir, "labels.txt")
+        with open(labels_dest, "w", encoding="utf-8") as f:
+            for idx, lbl in enumerate(labels):
+                f.write(f"{idx} {lbl}\n")
+
+        return {
+            "model_dir": save_dir,
+            "zip_path": zip_dest,
+            "model_path": model_dest,
+            "labels_path": labels_dest,
+        }
