@@ -33,8 +33,12 @@ def test_system_instructions_present():
     assert runner.BENCHMARK_PRESETS["flash_lite"]["model"] == "gemini-3.5-flash-lite"
     assert runner.BENCHMARK_PRESETS["flash"]["model"] == "gemini-3.8-flash"
     assert runner.BENCHMARK_PRESETS["decision"]["model"] == "gemini-decision-1"
+    assert runner.STAGE_CLASSES["intro"] == ("cat", "not_cat")
+    si0 = runner.get_system_instruction("intro")
     si1 = runner.get_system_instruction("stage1")
     si2 = runner.get_system_instruction("stage2")
+    assert "cat" in si0.lower() and "not_cat" in si0.lower()
+    assert "cat" in runner.get_default_prompt("intro", api_type="decisions").lower()
     assert "botanical" in si1.lower()
     assert "plant" in si1.lower()
     assert "invasive" in si2.lower()

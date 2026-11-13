@@ -261,6 +261,14 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
         if notes:
             st.info(f"📝 **Team Hypothesis & Experiment Notes:** {notes}")
 
+        if target_run.get("prompt") or target_run.get("preset") or target_item["label"].startswith("🤖 Benchmark:"):
+            preset_key = target_run.get("preset", "flash_lite")
+            api_type = GeminiBenchmarkRunner.BENCHMARK_PRESETS.get(preset_key, {}).get("api_type", "generate_content")
+            prompt_text = target_run.get("prompt") or gemini_runner.get_default_prompt(stage, api_type=api_type)
+            if prompt_text:
+                with st.expander("📝 Gemini Prompt / Instructions Used", expanded=False):
+                    st.code(prompt_text, language="text")
+
         if stage == "pipeline":
             s1_art = storage.get_model_artifact_bytes(run_id, subdir="stage1")
             s2_art = storage.get_model_artifact_bytes(run_id, subdir="stage2")
@@ -645,7 +653,11 @@ def render_dataset_tab(dataset_mgr: DatasetManager):
         api_key_input = st.text_input("Gemini API Key (optional if set in .streamlit/secrets.toml or GEMINI_API_KEY)", type="password")
         b_col1, b_col2 = st.columns(2)
         with b_col1:
-            bench_stage = st.selectbox("Stage to benchmark", options=["stage1", "stage2"])
+            bench_stage = st.selectbox(
+                "Stage to benchmark",
+                options=["intro", "stage1", "stage2"],
+                format_func=lambda s: STAGE_LABELS.get(s, s),
+            )
         with b_col2:
             preset_options = ["all"] + list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys())
             bench_preset = st.selectbox(
@@ -658,13 +670,44 @@ def render_dataset_tab(dataset_mgr: DatasetManager):
                 ),
             )
 
+        preview_runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
+        custom_prompt: Optional[str] = None
+        if bench_preset == "all":
+            st.markdown("**📝 Prompts / Instructions Sent to Gemini:**")
+            st.caption("VLM System Instruction (used by Flash-Lite & Flash):")
+            st.code(preview_runner.get_default_prompt(bench_stage, api_type="generate_content"), language="text")
+            st.caption("Decisions API Instructions & Criteria (used by Decision 1):")
+            st.code(preview_runner.get_default_prompt(bench_stage, api_type="decisions"), language="text")
+        else:
+            api_type = GeminiBenchmarkRunner.BENCHMARK_PRESETS[bench_preset]["api_type"]
+            default_prompt = preview_runner.get_default_prompt(bench_stage, api_type=api_type)
+            prompt_label = (
+                "📝 Decisions API Instructions (editable)"
+                if api_type == "decisions"
+                else "📝 VLM System Instruction Prompt (editable)"
+            )
+            if api_type == "decisions":
+                default_prompt = GeminiBenchmarkRunner.DECISION_CRITERIA[bench_stage]["instructions"]
+                st.caption("Decisions API Criteria:")
+                st.json(GeminiBenchmarkRunner.DECISION_CRITERIA[bench_stage]["criteria"])
+            custom_prompt = st.text_area(
+                prompt_label,
+                value=default_prompt,
+                height=110,
+                key=f"gemini_prompt_{bench_stage}_{bench_preset}",
+            )
+
         if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary"):
             targets = list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys()) if bench_preset == "all" else [bench_preset]
             with st.spinner("Connecting to Gemini API and running benchmark evaluation..."):
                 try:
                     runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
                     for target_preset in targets:
-                        bench_res = runner.evaluate_stage_benchmark(stage=bench_stage, preset=target_preset)
+                        bench_res = runner.evaluate_stage_benchmark(
+                            stage=bench_stage,
+                            preset=target_preset,
+                            custom_prompt=custom_prompt,
+                        )
                         st.success(
                             f"✅ {bench_res['model_name']} Recorded! "
                             f"F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%"

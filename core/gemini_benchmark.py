@@ -33,6 +33,12 @@ class GeminiBenchmarkRunner:
     }
 
     SYSTEM_INSTRUCTIONS: Dict[str, str] = {
+        "intro": (
+            "You are an expert image classifier. Identify whether the given image contains "
+            "a cat or if it is not a cat (e.g. dog, other animal, object, or background). "
+            "Respond ONLY with a valid JSON object formatted as: "
+            "{\"label\": \"cat\" | \"not_cat\", \"confidence\": float (0.0 to 1.0), \"reasoning\": string}"
+        ),
         "stage1": (
             "You are an expert botanical image classifier. Identify whether the given image contains "
             "a plant or natural plant foliage, or if it is a non-plant object (e.g. tools, shoes, ground, rocks, artificial items). "
@@ -48,6 +54,13 @@ class GeminiBenchmarkRunner:
     }
 
     DECISION_CRITERIA: Dict[str, Dict[str, Any]] = {
+        "intro": {
+            "instructions": "Classify whether this image shows a cat or not a cat.",
+            "criteria": {
+                "cat": "Image contains a cat (domestic cat or feline).",
+                "not_cat": "Image does not contain a cat (e.g., dog, other animal, object, or scenery).",
+            },
+        },
         "stage1": {
             "instructions": "Classify whether this image shows a real plant or a non-plant object.",
             "criteria": {
@@ -80,8 +93,24 @@ class GeminiBenchmarkRunner:
                 pass
         self.model_name = model_name
 
+    STAGE_CLASSES: Dict[str, Tuple[str, str]] = {
+        "intro": ("cat", "not_cat"),
+        "stage1": ("plant", "not_plant"),
+        "stage2": ("invasive", "non_invasive"),
+    }
+
     def get_system_instruction(self, stage: str) -> str:
         return self.SYSTEM_INSTRUCTIONS.get(stage, "")
+
+    def get_default_prompt(self, stage: str, api_type: str = "generate_content") -> str:
+        """Return the formatted default prompt/instructions for a stage and API type."""
+        if api_type == "decisions":
+            spec = self.DECISION_CRITERIA.get(stage, {})
+            criteria_lines = "\n".join(
+                f"- {k}: {v}" for k, v in spec.get("criteria", {}).items()
+            )
+            return f"{spec.get('instructions', '')}\n\nCriteria:\n{criteria_lines}".strip()
+        return self.get_system_instruction(stage)
 
     def load_cache(self) -> Dict[str, Any]:
         if os.path.exists(self.cache_file):
@@ -133,7 +162,12 @@ class GeminiBenchmarkRunner:
         )
 
     def _classify_with_decisions(
-        self, client: Any, model: str, pil_img: Image.Image, stage: str
+        self,
+        client: Any,
+        model: str,
+        pil_img: Image.Image,
+        stage: str,
+        instructions_override: Optional[str] = None,
     ) -> Tuple[str, float, str]:
         buf = io.BytesIO()
         pil_img.convert("RGB").save(buf, format="JPEG", quality=90)
@@ -143,12 +177,12 @@ class GeminiBenchmarkRunner:
         questions = {
             "classification": {
                 "type": "choice",
-                "instructions": spec["instructions"],
+                "instructions": instructions_override or spec["instructions"],
                 "criteria": spec["criteria"],
             }
         }
         input_payload = [
-            {"type": "text", "text": "Classify the botanical subject in this image."},
+            {"type": "text", "text": "Classify this image."},
             {
                 "type": "image",
                 "inline_data": {
@@ -200,11 +234,14 @@ class GeminiBenchmarkRunner:
         stage: str,
         test_images_dir: str = "data/test_dataset",
         preset: str = "flash_lite",
+        custom_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError(
                 "GEMINI_API_KEY is not set. Please set GEMINI_API_KEY in .streamlit/secrets.toml or your environment."
             )
+        if stage not in self.STAGE_CLASSES:
+            raise ValueError(f"Unknown stage: {stage}")
         if preset not in self.BENCHMARK_PRESETS:
             raise ValueError(f"Unknown Gemini benchmark preset: {preset}")
 
@@ -220,9 +257,10 @@ class GeminiBenchmarkRunner:
             client_kwargs["http_options"] = {"api_version": "v1beta"}
         client = genai.Client(**client_kwargs)
 
-        sys_instruction = self.get_system_instruction(stage)
-        pos_class = "plant" if stage == "stage1" else "invasive"
-        neg_class = "not_plant" if stage == "stage1" else "non_invasive"
+        default_prompt = self.get_default_prompt(stage, api_type=api_type)
+        prompt_used = (custom_prompt or "").strip() or default_prompt
+        sys_instruction = (custom_prompt or "").strip() or self.get_system_instruction(stage)
+        pos_class, neg_class = self.STAGE_CLASSES[stage]
 
         stage_dir = os.path.join(test_images_dir, stage)
         if not os.path.exists(stage_dir):
@@ -245,7 +283,11 @@ class GeminiBenchmarkRunner:
                     with Image.open(img_path) as pil_img:
                         if api_type == "decisions":
                             pred_label, conf, reasoning = self._classify_with_decisions(
-                                client, model, pil_img, stage
+                                client,
+                                model,
+                                pil_img,
+                                stage,
+                                instructions_override=(custom_prompt or "").strip() or None,
                             )
                         else:
                             pred_label, conf, reasoning = self._classify_with_generate_content(
@@ -287,6 +329,7 @@ class GeminiBenchmarkRunner:
             "model_name": preset_cfg["label"],
             "model_id": model,
             "version": preset_cfg["version"],
+            "prompt": prompt_used,
             "metrics": {
                 "accuracy": round(acc, 4),
                 "precision": round(prec, 4),
