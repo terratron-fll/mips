@@ -1,11 +1,36 @@
+import base64
+import io
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 
+
 class GeminiBenchmarkRunner:
-    """Evaluates benchmark reference scores using Gemini 2.5 Flash and botanical System Instructions."""
+    """Evaluates benchmark reference scores using Gemini Flash-Lite, Flash, and Decisions API."""
+
+    BENCHMARK_PRESETS: Dict[str, Dict[str, str]] = {
+        "flash_lite": {
+            "label": "Gemini 3.5 Flash-Lite",
+            "model": "gemini-3.5-flash-lite",
+            "api_type": "generate_content",
+            "version": "Zero-Shot VLM (SI)",
+        },
+        "flash": {
+            "label": "Gemini 3.8 Flash",
+            "model": "gemini-3.8-flash",
+            "api_type": "generate_content",
+            "version": "Zero-Shot VLM (SI)",
+        },
+        "decision": {
+            "label": "Gemini Decision 1",
+            "model": "gemini-decision-1",
+            "api_type": "decisions",
+            "version": "Decisions API (Zero Output Tokens)",
+        },
+    }
 
     SYSTEM_INSTRUCTIONS: Dict[str, str] = {
         "stage1": (
@@ -22,18 +47,35 @@ class GeminiBenchmarkRunner:
         ),
     }
 
+    DECISION_CRITERIA: Dict[str, Dict[str, Any]] = {
+        "stage1": {
+            "instructions": "Classify whether this image shows a real plant or a non-plant object.",
+            "criteria": {
+                "plant": "Image contains a plant, weed, tree, grass, or natural plant foliage.",
+                "not_plant": "Image shows a non-plant object such as tools, shoes, soil, rocks, or artificial items.",
+            },
+        },
+        "stage2": {
+            "instructions": "Classify whether the plant in this image is an invasive species or a non-invasive plant.",
+            "criteria": {
+                "invasive": "An invasive weed or invasive plant species.",
+                "non_invasive": "A native, harmless, or non-invasive plant.",
+            },
+        },
+    }
+
     def __init__(
         self,
         cache_file: str = "data/gemini_cache.json",
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash",
+        model_name: str = "gemini-3.5-flash-lite",
     ) -> None:
         self.cache_file = cache_file
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
             try:
                 import streamlit as st
-                self.api_key = st.secrets.get("GEMINI_API_KEY")
+                self.api_key = st.secrets.get("GEMINI_API_KEY") or None
             except Exception:
                 pass
         self.model_name = model_name
@@ -57,18 +99,127 @@ class GeminiBenchmarkRunner:
         with open(self.cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
+    def get_stage_benchmarks(self, stage: str) -> List[Dict[str, Any]]:
+        """Return cached benchmark entries for a stage (supports both legacy single-entry and multi-preset caches)."""
+        cache = self.load_cache()
+        stage_data = cache.get(stage)
+        if not stage_data:
+            return []
+        if "metrics" in stage_data:
+            return [stage_data]
+        ordered_keys = [k for k in self.BENCHMARK_PRESETS if k in stage_data]
+        extra_keys = [k for k in stage_data if k not in self.BENCHMARK_PRESETS]
+        return [stage_data[k] for k in ordered_keys + extra_keys if isinstance(stage_data[k], dict)]
+
+    def _classify_with_generate_content(
+        self, client: Any, types: Any, model: str, pil_img: Image.Image, sys_instruction: str
+    ) -> Tuple[str, float, str]:
+        response = client.models.generate_content(
+            model=model,
+            contents=["Classify this image:", pil_img],
+            config=types.GenerateContentConfig(
+                system_instruction=sys_instruction,
+                response_mime_type="application/json",
+            ),
+        )
+        text_resp = response.text or "{}"
+        json_match = re.search(r"\{.*\}", text_resp, re.DOTALL)
+        json_str = json_match.group(0) if json_match else "{}"
+        data = json.loads(json_str)
+        return (
+            str(data.get("label", "")).lower(),
+            float(data.get("confidence", 0.90)),
+            str(data.get("reasoning", "")),
+        )
+
+    def _classify_with_decisions(
+        self, client: Any, model: str, pil_img: Image.Image, stage: str
+    ) -> Tuple[str, float, str]:
+        buf = io.BytesIO()
+        pil_img.convert("RGB").save(buf, format="JPEG", quality=90)
+        img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        spec = self.DECISION_CRITERIA[stage]
+        questions = {
+            "classification": {
+                "type": "choice",
+                "instructions": spec["instructions"],
+                "criteria": spec["criteria"],
+            }
+        }
+        input_payload = [
+            {"type": "text", "text": "Classify the botanical subject in this image."},
+            {
+                "type": "image",
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": img_b64,
+                },
+            },
+        ]
+
+        if hasattr(client, "decisions"):
+            result = client.decisions.create(
+                model=model,
+                input=input_payload,
+                questions=questions,
+            )
+            answer = result.answers["classification"]
+            if isinstance(answer, dict):
+                pred_label = str(answer.get("choice", answer.get("answer", ""))).lower()
+                conf = float(answer.get("confidence", 0.90))
+            else:
+                pred_label = str(getattr(answer, "choice", getattr(answer, "answer", ""))).lower()
+                conf = float(getattr(answer, "confidence", 0.90))
+            return pred_label, conf, "Decisions API choice"
+
+        # REST fallback for older google-genai versions (< 3.2)
+        payload = json.dumps({
+            "model": model,
+            "input": input_payload,
+            "questions": questions,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/decisions",
+            data=payload,
+            headers={
+                "x-goog-api-key": self.api_key or "",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        answer = body.get("answers", {}).get("classification", {})
+        pred_label = str(answer.get("choice", answer.get("answer", ""))).lower()
+        conf = float(answer.get("confidence", 0.90))
+        return pred_label, conf, "Decisions API choice"
+
     def evaluate_stage_benchmark(
-        self, stage: str, test_images_dir: str = "data/test_dataset"
+        self,
+        stage: str,
+        test_images_dir: str = "data/test_dataset",
+        preset: str = "flash_lite",
     ) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError(
-                "GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable or Streamlit secret."
+                "GEMINI_API_KEY is not set. Please set GEMINI_API_KEY in .streamlit/secrets.toml or your environment."
             )
+        if preset not in self.BENCHMARK_PRESETS:
+            raise ValueError(f"Unknown Gemini benchmark preset: {preset}")
+
+        preset_cfg = self.BENCHMARK_PRESETS[preset]
+        model = preset_cfg["model"]
+        api_type = preset_cfg["api_type"]
 
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": self.api_key}
+        if api_type == "decisions":
+            client_kwargs["http_options"] = {"api_version": "v1beta"}
+        client = genai.Client(**client_kwargs)
+
         sys_instruction = self.get_system_instruction(stage)
         pos_class = "plant" if stage == "stage1" else "invasive"
         neg_class = "not_plant" if stage == "stage1" else "non_invasive"
@@ -91,26 +242,16 @@ class GeminiBenchmarkRunner:
                     continue
                 img_path = os.path.join(cls_folder, fname)
                 try:
-                    pil_img = Image.open(img_path)
-                    # Pass [prompt, pil_img] directly so the SDK automatically creates an inline Blob
-                    response = client.models.generate_content(
-                        model=self.model_name,
-                        contents=["Classify this image:", pil_img],
-                        config=types.GenerateContentConfig(
-                            system_instruction=sys_instruction,
-                            response_mime_type="application/json",
-                            temperature=0.0,
-                        ),
-                    )
+                    with Image.open(img_path) as pil_img:
+                        if api_type == "decisions":
+                            pred_label, conf, reasoning = self._classify_with_decisions(
+                                client, model, pil_img, stage
+                            )
+                        else:
+                            pred_label, conf, reasoning = self._classify_with_generate_content(
+                                client, types, model, pil_img, sys_instruction
+                            )
 
-                    text_resp = response.text or "{}"
-                    # Robust extraction of JSON object substring
-                    json_match = re.search(r"\{.*\}", text_resp, re.DOTALL)
-                    json_str = json_match.group(0) if json_match else "{}"
-                    data = json.loads(json_str)
-
-                    pred_label = data.get("label", "").lower()
-                    conf = float(data.get("confidence", 0.90))
                     pred_binary = 1 if pred_label == pos_class else 0
 
                     y_true.append(true_binary)
@@ -123,7 +264,7 @@ class GeminiBenchmarkRunner:
                             "true_label": cls_name,
                             "predicted_label": pred_label,
                             "confidence": round(conf, 4),
-                            "reasoning": data.get("reasoning", ""),
+                            "reasoning": reasoning,
                             "error_type": "False Positive" if pred_binary == 1 else "False Negative",
                         })
                 except Exception:
@@ -142,6 +283,10 @@ class GeminiBenchmarkRunner:
 
         benchmark_result = {
             "stage": stage,
+            "preset": preset,
+            "model_name": preset_cfg["label"],
+            "model_id": model,
+            "version": preset_cfg["version"],
             "metrics": {
                 "accuracy": round(acc, 4),
                 "precision": round(prec, 4),
@@ -156,9 +301,13 @@ class GeminiBenchmarkRunner:
             "errors": errors,
         }
 
-        # Save to cache
+        # Save to cache under cache[stage][preset]
         cache = self.load_cache()
-        cache[stage] = benchmark_result
+        existing_stage = cache.get(stage)
+        if not isinstance(existing_stage, dict) or "metrics" in existing_stage:
+            existing_stage = {}
+        existing_stage[preset] = benchmark_result
+        cache[stage] = existing_stage
         self.save_cache(cache)
 
         return benchmark_result

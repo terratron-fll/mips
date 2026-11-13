@@ -1,3 +1,4 @@
+import io
 import os
 import zipfile
 from PIL import Image
@@ -60,3 +61,42 @@ def test_split_and_training_pack_generation(dummy_raw_dataset):
         assert any("plant/" in n for n in names)
         # Should contain exactly 14 training images
         assert len([n for n in names if not n.endswith("/")]) == 14
+
+
+def _make_png_bytes(size=(100, 100), color=(10, 120, 200)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGBA", size, color=color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_save_uploaded_images_valid_collision_and_invalid(tmp_path):
+    dm = DatasetManager(base_data_dir=str(tmp_path))
+    png_bytes = _make_png_bytes()
+
+    saved, errors = dm.save_uploaded_images(
+        "stage1",
+        "plant",
+        [
+            ("../../weird name!.png", png_bytes),
+            ("weird name!.png", png_bytes),
+            ("corrupt.jpg", b"not-an-image"),
+        ],
+    )
+
+    assert saved == 2
+    assert len(errors) == 1
+    assert "corrupt.jpg" in errors[0]
+
+    plant_dir = tmp_path / "raw" / "stage1" / "plant"
+    saved_files = sorted(os.listdir(plant_dir))
+    assert len(saved_files) == 2
+    assert all(f.endswith(".jpg") for f in saved_files)
+    assert dm.get_dataset_stats()["stage1"]["plant"] == 2
+
+
+def test_save_uploaded_images_rejects_bad_stage_or_class(tmp_path):
+    dm = DatasetManager(base_data_dir=str(tmp_path))
+    with pytest.raises(ValueError):
+        dm.save_uploaded_images("unknown_stage", "plant", [])
+    with pytest.raises(ValueError):
+        dm.save_uploaded_images("stage1", "wrong_class", [])

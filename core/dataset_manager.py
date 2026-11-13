@@ -1,6 +1,9 @@
+import io
 import os
 import random
+import re
 import shutil
+import uuid
 import zipfile
 from typing import Dict, List, Tuple
 from PIL import Image
@@ -113,6 +116,44 @@ class DatasetManager:
                         summary[stage]["train"] += 1
 
         return summary
+
+    def save_uploaded_images(
+        self,
+        stage: str,
+        cls: str,
+        files: List[Tuple[str, bytes]],
+        max_size: int = 896,
+        quality: int = 90,
+    ) -> Tuple[int, List[str]]:
+        """Validate, sanitize, and save uploaded image bytes into data/raw/<stage>/<cls>."""
+        if stage not in self.STAGES:
+            raise ValueError(f"Unknown stage: {stage}")
+        if cls not in self.STAGES[stage]:
+            raise ValueError(f"Invalid class '{cls}' for stage '{stage}'")
+
+        dest_dir = os.path.join(self.raw_dir, stage, cls)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        saved_count = 0
+        errors: List[str] = []
+
+        for orig_name, data in files:
+            safe_base = os.path.basename(orig_name or "upload.jpg")
+            stem = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.splitext(safe_base)[0]).strip("_") or "image"
+            dest_path = os.path.join(dest_dir, f"{stem}.jpg")
+            if os.path.exists(dest_path):
+                dest_path = os.path.join(dest_dir, f"{stem}_{uuid.uuid4().hex[:6]}.jpg")
+
+            try:
+                with Image.open(io.BytesIO(data)) as img:
+                    img = img.convert("RGB")
+                    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    img.save(dest_path, "JPEG", quality=quality, optimize=True)
+                saved_count += 1
+            except Exception as exc:
+                errors.append(f"{safe_base}: {exc}")
+
+        return saved_count, errors
 
     def create_student_training_packs(self) -> Dict[str, str]:
         pack_paths: Dict[str, str] = {}

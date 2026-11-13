@@ -103,12 +103,11 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
     st.header(f"{stage_name} Leaderboard")
     leaderboard = storage.get_leaderboard(stage=stage)
 
-    # Check for cached Gemini VLM benchmark
+    # Check for cached Gemini benchmarks
     gemini_runner = GeminiBenchmarkRunner()
-    cache = gemini_runner.load_cache()
-    gemini_entry = cache.get(stage)
+    gemini_entries = gemini_runner.get_stage_benchmarks(stage)
 
-    if not leaderboard and not gemini_entry:
+    if not leaderboard and not gemini_entries:
         st.info(f"No models submitted to {stage_name} yet. Be the first team to submit!")
         return
 
@@ -124,12 +123,14 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
     # Leaderboard table
     rows = []
-    if gemini_entry:
+    for gemini_entry in gemini_entries:
         gm = gemini_entry.get("metrics", {})
+        gemini_label = gemini_entry.get("model_name", "Gemini 3.5 Flash-Lite")
+        gemini_version = gemini_entry.get("version", "Zero-Shot VLM (SI)")
         rows.append({
             "Rank": "🤖 BENCHMARK",
-            "Team": "Gemini 2.5 Flash",
-            "Version": "Zero-Shot VLM (SI)",
+            "Team": gemini_label,
+            "Version": gemini_version,
             "F1-Score": f"{gm.get('f1', 0.0):.3f}",
             "Accuracy": f"{gm.get('accuracy', 0.0) * 100:.1f}%",
             "Precision": f"{gm.get('precision', 0.0):.3f}",
@@ -165,9 +166,11 @@ def render_board(storage: StorageManager, stage: str, stage_name: str, pos_label
 
     # Build ordered list of inspectable run objects matching the table rows
     inspectable_runs = []
-    if gemini_entry:
+    for gemini_entry in gemini_entries:
+        gemini_label = gemini_entry.get("model_name", "Gemini 3.5 Flash-Lite")
+        gemini_version = gemini_entry.get("version", "Zero-Shot VLM")
         inspectable_runs.append({
-            "label": "🤖 Benchmark: Gemini 2.5 Flash (Zero-Shot VLM)",
+            "label": f"🤖 Benchmark: {gemini_label} ({gemini_version})",
             "run": gemini_entry,
         })
 
@@ -482,19 +485,85 @@ def render_pipeline_board(storage: StorageManager, evaluator: ModelEvaluator):
     st.subheader("Field Robot Simulation Leaderboard")
     render_board(storage, stage="pipeline", stage_name="Field Robot", pos_label="invasive", neg_label="safe/harmless")
 
-def render_admin_tab(dataset_mgr: DatasetManager):
-    st.header("🛠️ Coach Dataset Administration")
+STAGE_LABELS = {
+    "intro": "🐱 Tutorial: Cat vs Not-Cat",
+    "stage1": "🌿 Stage 1: Plant vs Not-Plant",
+    "stage2": "⚠️ Stage 2: Invasive vs Non-Invasive",
+}
+
+
+def render_training_pack_download(
+    dataset_mgr: DatasetManager,
+    stage: str,
+    label: str,
+    key: str,
+    empty_message: str | None = None,
+):
+    pack_path = os.path.join(dataset_mgr.packs_dir, f"{stage}_train.zip")
+    if os.path.exists(pack_path):
+        with open(pack_path, "rb") as f:
+            st.download_button(
+                label=label,
+                data=f.read(),
+                file_name=f"{stage}_train.zip",
+                mime="application/zip",
+                key=key,
+            )
+    else:
+        st.info(
+            empty_message
+            or f"`{stage}_train.zip` has not been generated yet. Head to **🗂️ Dataset Manager** to upload photos and generate splits."
+        )
+
+
+def render_dataset_tab(dataset_mgr: DatasetManager):
+    st.header("🗂️ Dataset Manager")
     st.markdown(
-        "Manage image intake, downsampling (to keep dataset < 25 MB), stratified 70/30 splitting, "
-        "and generate student training packs."
+        "Upload new training photos, inspect dataset counts, generate 70/30 train/test splits, "
+        "and download student training packs."
     )
 
-    pin = st.text_input("Enter Coach Access PIN", type="password")
-    if pin != "fll2026" and pin != "coach":
-        st.warning("Please enter the coach PIN (`fll2026`) to access dataset administration.")
-        return
+    st.subheader("📸 Upload Photos to Dataset")
+    up_col1, up_col2 = st.columns(2)
+    with up_col1:
+        upload_stage = st.selectbox(
+            "Dataset Stage",
+            options=list(DatasetManager.STAGES.keys()),
+            format_func=lambda s: STAGE_LABELS.get(s, s),
+            key="dataset_upload_stage",
+        )
+    with up_col2:
+        upload_class = st.selectbox(
+            "Class Label",
+            options=DatasetManager.STAGES[upload_stage],
+            format_func=lambda c: c.replace("_", " ").title(),
+            key="dataset_upload_class",
+        )
 
-    st.success("🔓 Coach Access Granted")
+    uploaded_photos = st.file_uploader(
+        "Select photos to add (.jpg, .jpeg, .png, .webp)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key="dataset_photo_uploader",
+    )
+
+    if st.button("📤 Add Photos to Dataset", type="primary"):
+        if not uploaded_photos:
+            st.warning("Please select at least one photo to upload.")
+        else:
+            file_payload = [(f.name, f.read()) for f in uploaded_photos]
+            saved_count, upload_errors = dataset_mgr.save_uploaded_images(
+                upload_stage, upload_class, file_payload
+            )
+            if saved_count:
+                st.success(
+                    f"✅ Added {saved_count} photo(s) to `{upload_stage}/{upload_class}`! "
+                    "Click **⚡ Process & Generate Splits** below to include them in the training packs and test set."
+                )
+            if upload_errors:
+                st.error("Skipped invalid file(s): " + "; ".join(upload_errors))
+
+    st.divider()
     stats = dataset_mgr.get_dataset_stats()
 
     st.subheader("📊 Current Raw Dataset Pool (`data/raw/`)")
@@ -532,72 +601,76 @@ def render_admin_tab(dataset_mgr: DatasetManager):
     if st.button("⚡ Process & Generate Splits", type="primary"):
         with st.spinner("Processing, downsampling, and generating packs..."):
             summary = dataset_mgr.process_and_split_dataset(test_ratio=test_ratio)
-            packs = dataset_mgr.create_student_training_packs()
+            dataset_mgr.create_student_training_packs()
             st.success("✅ Dataset split generated successfully!")
             st.json(summary)
 
     st.divider()
     st.subheader("📦 Download Student Training Packs")
-    packs_dir = dataset_mgr.packs_dir
-    p0 = os.path.join(packs_dir, "intro_train.zip")
-    p1 = os.path.join(packs_dir, "stage1_train.zip")
-    p2 = os.path.join(packs_dir, "stage2_train.zip")
-
     col_d0, col_d1, col_d2 = st.columns(3)
     with col_d0:
-        if os.path.exists(p0):
-            with open(p0, "rb") as f:
-                st.download_button(
-                    label="📥 Download Tutorial Pack (.zip)",
-                    data=f.read(),
-                    file_name="intro_train.zip",
-                    mime="application/zip",
-                )
-        else:
-            st.info("Tutorial training pack not generated yet.")
-
+        render_training_pack_download(
+            dataset_mgr,
+            stage="intro",
+            label="📥 Download Tutorial Pack (.zip)",
+            key="dl_admin_intro",
+            empty_message="Tutorial training pack not generated yet.",
+        )
     with col_d1:
-        if os.path.exists(p1):
-            with open(p1, "rb") as f:
-                st.download_button(
-                    label="📥 Download Stage 1 Training Pack (.zip)",
-                    data=f.read(),
-                    file_name="stage1_train.zip",
-                    mime="application/zip",
-                )
-        else:
-            st.info("Stage 1 training pack not generated yet.")
-
+        render_training_pack_download(
+            dataset_mgr,
+            stage="stage1",
+            label="📥 Download Stage 1 Training Pack (.zip)",
+            key="dl_admin_stage1",
+            empty_message="Stage 1 training pack not generated yet.",
+        )
     with col_d2:
-        if os.path.exists(p2):
-            with open(p2, "rb") as f:
-                st.download_button(
-                    label="📥 Download Stage 2 Training Pack (.zip)",
-                    data=f.read(),
-                    file_name="stage2_train.zip",
-                    mime="application/zip",
-                )
-        else:
-            st.info("Stage 2 training pack not generated yet.")
+        render_training_pack_download(
+            dataset_mgr,
+            stage="stage2",
+            label="📥 Download Stage 2 Training Pack (.zip)",
+            key="dl_admin_stage2",
+            empty_message="Stage 2 training pack not generated yet.",
+        )
 
     st.divider()
-    st.subheader("🤖 Coach P2: Gemini 2.5 Flash VLM Benchmark")
-    st.write(
-        "Run the state-of-the-art Gemini 2.5 Flash foundation model with botanical System Instructions "
-        "across the locked test set to establish an industry reference bar on the Leaderboard."
-    )
-    api_key_input = st.text_input("Gemini API Key (optional if GEMINI_API_KEY is in environment)", type="password")
-    bench_stage = st.selectbox("Stage to benchmark", options=["stage1", "stage2"])
+    with st.expander("🤖 Coach Reference: Gemini Foundation Model Benchmarks", expanded=False):
+        st.write(
+            "Run **Gemini 3.5 Flash-Lite**, **Gemini 3.8 Flash**, and/or **Gemini Decision 1 (Decisions API)** "
+            "across the locked test set to establish reference bars on the Leaderboard. "
+            "Results are saved to `data/gemini_cache.json` (scores only — no API key is stored). "
+            "For Streamlit Community Cloud, run this locally (with `.streamlit/secrets.toml`) and commit `data/gemini_cache.json` instead of adding `GEMINI_API_KEY` to Cloud Secrets."
+        )
+        api_key_input = st.text_input("Gemini API Key (optional if set in .streamlit/secrets.toml or GEMINI_API_KEY)", type="password")
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            bench_stage = st.selectbox("Stage to benchmark", options=["stage1", "stage2"])
+        with b_col2:
+            preset_options = ["all"] + list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys())
+            bench_preset = st.selectbox(
+                "Gemini Benchmark Model / API",
+                options=preset_options,
+                format_func=lambda p: (
+                    "All 3 Benchmarks (Flash-Lite + Flash + Decision 1)"
+                    if p == "all"
+                    else f"{GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['label']} ({GeminiBenchmarkRunner.BENCHMARK_PRESETS[p]['model']})"
+                ),
+            )
 
-    if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary"):
-        with st.spinner("Connecting to Gemini API and running zero-shot botanical classification..."):
-            try:
-                runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
-                bench_res = runner.evaluate_stage_benchmark(stage=bench_stage)
-                st.success(f"✅ Gemini Benchmark Recorded! F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%")
-                st.json(bench_res["metrics"])
-            except Exception as e:
-                st.error(f"Gemini Benchmark Error: {str(e)}")
+        if st.button("⚡ Run Gemini Benchmark & Cache", type="secondary"):
+            targets = list(GeminiBenchmarkRunner.BENCHMARK_PRESETS.keys()) if bench_preset == "all" else [bench_preset]
+            with st.spinner("Connecting to Gemini API and running benchmark evaluation..."):
+                try:
+                    runner = GeminiBenchmarkRunner(api_key=api_key_input or None)
+                    for target_preset in targets:
+                        bench_res = runner.evaluate_stage_benchmark(stage=bench_stage, preset=target_preset)
+                        st.success(
+                            f"✅ {bench_res['model_name']} Recorded! "
+                            f"F1: {bench_res['metrics']['f1']:.3f} | Accuracy: {bench_res['metrics']['accuracy'] * 100:.1f}%"
+                        )
+                        st.json(bench_res["metrics"])
+                except Exception as e:
+                    st.error(f"Gemini Benchmark Error: {str(e)}")
 
 def main():
     st.title("🌿 MIPS: Invasive Plant Species ML Platform")
@@ -613,7 +686,7 @@ def main():
         "⚠️ Board 2: Invasive vs Non-Invasive",
         "🏆 Board 3: Field Robot Pipeline",
         "📤 Submit Model",
-        "🛠️ Coach Dataset Admin",
+        "🗂️ Dataset Manager",
     ])
 
     with tab_intro:
@@ -633,22 +706,30 @@ def main():
             > 5. Upload that downloaded `.zip` file in the **📤 Submit Model** tab to evaluate!
             """
         )
-        p0 = os.path.join(dataset_mgr.packs_dir, "intro_train.zip")
-        if os.path.exists(p0):
-            with open(p0, "rb") as f:
-                st.download_button(
-                    label="📥 Download Tutorial Training Pack (intro_train.zip)",
-                    data=f.read(),
-                    file_name="intro_train.zip",
-                    mime="application/zip",
-                    key="dl_intro_tab",
-                )
+        render_training_pack_download(
+            dataset_mgr,
+            stage="intro",
+            label="📥 Download Tutorial Training Pack (intro_train.zip)",
+            key="dl_intro_tab",
+        )
         render_board(storage, stage="intro", stage_name="🐱 Tutorial: Cat vs Not-Cat", pos_label="cat", neg_label="not_cat")
 
     with tab_b1:
+        render_training_pack_download(
+            dataset_mgr,
+            stage="stage1",
+            label="📥 Download Stage 1 Training Pack (stage1_train.zip)",
+            key="dl_stage1_tab",
+        )
         render_board(storage, stage="stage1", stage_name="🌿 Stage 1 (Plant vs Not-Plant)", pos_label="plant", neg_label="not_plant")
 
     with tab_b2:
+        render_training_pack_download(
+            dataset_mgr,
+            stage="stage2",
+            label="📥 Download Stage 2 Training Pack (stage2_train.zip)",
+            key="dl_stage2_tab",
+        )
         render_board(storage, stage="stage2", stage_name="⚠️ Stage 2 (Invasive vs Non-Invasive)", pos_label="invasive", neg_label="non_invasive")
 
     with tab_b3:
@@ -658,7 +739,7 @@ def main():
         render_submit_tab(storage, evaluator)
 
     with tab_admin:
-        render_admin_tab(dataset_mgr)
+        render_dataset_tab(dataset_mgr)
 
 if __name__ == "__main__":
     main()

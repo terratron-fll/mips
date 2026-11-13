@@ -44,11 +44,12 @@ Open your browser to `http://localhost:8501`. (On team Wi-Fi, other students can
 
 ---
 
-## 👩‍🏫 Coach Dataset Administration
-- Open the **Coach Dataset Admin** tab in the app (PIN: `fll2026`).
+## 🗂️ Dataset Management
+- Open the **Dataset Manager** tab in the app.
+- Upload team-collected photos directly in the browser for any stage/class (or drop them into `data/raw/stage1/` and `data/raw/stage2/`).
 - Click **⚡ Fetch Cat vs. Not-Cat from Hugging Face** to immediately pull the tutorial starter set.
-- Drop team-collected weed photos into `data/raw/stage1/` and `data/raw/stage2/`.
 - Click **Process & Generate Splits** to automatically downsample to $448 \times 448$ (saving disk space), and generate the locked 30% test set and 70% student training packs.
+- Students can download `intro_train.zip`, `stage1_train.zip`, and `stage2_train.zip` directly on their respective Board tabs.
 
 ---
 
