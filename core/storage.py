@@ -74,7 +74,10 @@ class StorageManager:
         return run.get("dataset_id") or DatasetRegistry.infer_dataset_id(run.get("stage", ""))
 
     def get_leaderboard(
-        self, stage: str, dataset_id: Optional[str] = None
+        self,
+        stage: str,
+        dataset_id: Optional[str] = None,
+        split_version: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         runs = self._load_all()
         stage_runs = [
@@ -82,6 +85,7 @@ class StorageManager:
             for r in runs
             if r.get("stage") == stage
             and (dataset_id is None or self._run_dataset_id(r) == dataset_id)
+            and (split_version is None or r.get("split_version", 1) == split_version)
         ]
 
         # Sort descending by F1, then by Accuracy
@@ -99,11 +103,14 @@ class StorageManager:
         team_name: Optional[str] = None,
         stage: Optional[str] = None,
         dataset_id: Optional[str] = None,
+        split_version: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         runs = self._load_all()
         filtered = runs
         if dataset_id is not None:
             filtered = [r for r in filtered if self._run_dataset_id(r) == dataset_id]
+        if split_version is not None:
+            filtered = [r for r in filtered if r.get("split_version", 1) == split_version]
         if team_name:
             filtered = [r for r in filtered if r.get("team_name") == team_name]
         if stage:

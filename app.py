@@ -174,7 +174,11 @@ def render_board(
         key=f"split_filter_{dataset_config.id}_{stage}",
     )
     split_filter = current_split if split_choice == "current" else None
-    leaderboard = storage.get_leaderboard(stage=stage, split_version=split_filter)
+    leaderboard = storage.get_leaderboard(
+        stage=stage,
+        dataset_id=dataset_config.id,
+        split_version=split_filter,
+    )
 
     # Check for cached Gemini benchmarks
     gemini_runner = GeminiBenchmarkRunner(dataset_config=dataset_config, r2_sync=r2_sync)
@@ -288,7 +292,11 @@ def render_board(
 
     # Hill-climbing line chart
     st.subheader("📈 Hill-Climbing Progress Over Time")
-    history = storage.get_history(stage=stage, split_version=split_filter)
+    history = storage.get_history(
+        stage=stage,
+        dataset_id=dataset_config.id,
+        split_version=split_filter,
+    )
     chart_data = []
     for h in history:
         m = h.get("metrics", {})
@@ -463,7 +471,7 @@ def render_submit_tab(
                 run_id = f"run-{uuid.uuid4().hex[:8]}"
                 save_dir = os.path.join(storage.models_dir, run_id)
                 results = evaluator.evaluate_submission(zip_bytes, stage=stage, save_dir=save_dir)
-                storage.save_model_artifact(run_id, f"{run_id}.zip", zip_bytes)
+                storage.save_model_artifact(run_id, zip_bytes)
 
                 metrics = results["metrics"]
                 errors = results["errors"]
@@ -555,8 +563,8 @@ def render_pipeline_board(
                     stage1_save_dir=s1_save_dir,
                     stage2_save_dir=s2_save_dir,
                 )
-                storage.save_model_artifact(run_id, "stage1.zip", s1_bytes)
-                storage.save_model_artifact(run_id, "stage2.zip", s2_bytes)
+                storage.save_model_artifact(run_id, s1_bytes, subdir="stage1")
+                storage.save_model_artifact(run_id, s2_bytes, subdir="stage2")
                 pipeline_metrics = pipeline_run["metrics"]
 
                 storage.save_run({
@@ -968,7 +976,7 @@ def main():
     subtitle = active_dataset.description or "First Lego League (FLL) Team 🤖 | Machine Learning Experiment Tracker & Leaderboards"
     st.caption(f"{subtitle} | Split v{active_dataset.split_version}")
 
-    storage = StorageManager(dataset_id=active_dataset.id, r2_sync=r2_sync)
+    storage = StorageManager(r2_sync=r2_sync)
     dataset_mgr = DatasetManager(dataset_config=active_dataset, r2_sync=r2_sync)
     evaluator = ModelEvaluator(test_dataset_dir=dataset_mgr.test_dir, dataset_config=active_dataset)
 
